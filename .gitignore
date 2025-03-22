@@ -1,0 +1,48 @@
+# 🐍 Python Caches
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+
+# 📦 Virtuelle Umgebungen
+venv/
+venv_librosa/
+.env/
+.envrc
+
+# 🧪 Test-/Debug-Dateien
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+
+# 📽️ Große Medien-Dateien (nicht ins Git!)
+*.mp4
+*.wav
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+
+# 📦 Output-Dateien
+output*.mp4
+test_output*.*
+*.json
+*.npy
+v
+*.mp4
+*.avi
+*.mov
+*.flac
+*.png
+*.jpg
+*.jpeg
+*.bmp
+__pycache__/
+*.pyc
+
