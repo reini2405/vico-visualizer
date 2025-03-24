@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import os
+import numpy as np
+import librosa
+import cv2
+import tempfile
+import multiprocessing
+from moviepy.editor import VideoFileClip
+from tqdm import tqdm
+
+clip_for_mp = None
+rms_data = []
+zoom_factor = 1.0
+zoom_start = 0
+zoom_end = float("inf")
+frame_h = None
+frame_w = None
+
+def parse_timerange(s):
+    if not s:
+        return 0, float('inf')
+    start, end = s.split("-")
+    return float(start), float(end)
+
+def analyze_rms(audio_path):
+    y, sr = librosa.load(audio_path, sr=None, mono=True)
+    rms = librosa.feature.rms(y=y)[0]
+    hop_length = 512
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    return list(zip(times, rms))
+
+def get_rms_at_time(t):
+    if t <= rms_data[0][0]:
+        return rms_data[0][1]
+    if t >= rms_data[-1][0]:
+        return rms_data[-1][1]
+    for i in range(len(rms_data) - 1):
+        t0, t1 = rms_data[i][0], rms_data[i + 1][0]
+        if t0 <= t < t1:
+            return rms_data[i][1]
+    return rms_data[-1][1]
+
+def safe_crop_and_resize(frame, nh, nw, h, w):
+    top = max((nh - h) // 2, 0)
+    left = max((nw - w) // 2, 0)
+    cropped = frame[top:top+h, left:left+w]
+
+    # Stelle sicher, dass das finale Bild exakt die Zielgröße hat
+    if cropped.shape[0] != h or cropped.shape[1] != w:
+        cropped = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    return cropped
+
+def apply_zoom(t):
+    global clip_for_mp, frame_h, frame_w
+    frame = clip_for_mp.get_frame(t).astype(np.float32)
+
+    if not (zoom_start <= t <= zoom_end):
+        return frame.astype(np.uint8)
+
+    rms = get_rms_at_time(t)
+    factor = max(1.0 + rms * zoom_factor, 1.01)
+
+    h, w = frame.shape[:2]
+    nh, nw = int(h * factor), int(w * factor)
+
+    zoomed = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    cropped = safe_crop_and_resize(zoomed, nh, nw, h, w)
+
+    np.clip(cropped, 0, 255, out=cropped)
+    return cropped.astype(np.uint8)
+
+def process(input_video, output_video, zoom_strength, t_range):
+    global clip_for_mp, rms_data, zoom_factor, zoom_start, zoom_end, frame_h, frame_w
+
+    zoom_factor = zoom_strength
+    zoom_start, zoom_end = t_range
+
+    audio_file = input_video + ".wav"
+    os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
+
+    rms_data = analyze_rms(audio_file)
+    clip = VideoFileClip(input_video)
+    clip_for_mp = clip
+    frame_h, frame_w = int(clip.h), int(clip.w)
+
+    fps = clip.fps
+    times = np.arange(0, clip.duration, 1.0 / fps)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        frame_dir = os.path.join(tmpdir, "frames")
+        os.makedirs(frame_dir)
+
+        print("🔁 Generiere Zoom-Frames...")
+        frames = []
+        for t in tqdm(times, total=len(times)):
+            frame = apply_zoom(t)
+            frames.append(frame)
+
+        for i, frame in enumerate(frames):
+            path = os.path.join(frame_dir, f"frame_{i:05d}.png")
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(path, frame_bgr)
+
+        print(f"🎬 Erzeuge {output_video}...")
+        cmd = f"ffmpeg -y -framerate {fps} -i {frame_dir}/frame_%05d.png -i {audio_file} -c:v libx264 -preset fast -crf 18 -c:a aac -shortest {output_video}"
+        os.system(cmd)
+
+    print(f"✅ Fertig: {output_video}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="🎥 Zoom-Effekt basierend auf Audio-Lautstärke (RMS)")
+    parser.add_argument("-z", "--zoom", type=float, required=True, help="Zoom-Verstärkung (z.B. 1.5)")
+    parser.add_argument("-t", "--time", type=parse_timerange, default="0-9999", help="Zeitbereich in Sekunden z.B. 10-60")
+
+    args = parser.parse_args()
+
+    process(
+        input_video="output-color.mp4",
+        output_video="output-zoom.mp4",
+        zoom_strength=args.zoom,
+        t_range=args.time
+    )

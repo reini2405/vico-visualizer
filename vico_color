@@ -1,0 +1,149 @@
+#!/root/venv_librosa/bin/python
+# -*- coding: utf-8 -*-
+
+import sys
+import os
+import numpy as np
+import argparse
+import librosa
+import cv2
+import tempfile
+import shutil
+import multiprocessing
+from moviepy.editor import VideoFileClip
+from tqdm import tqdm
+
+
+# ====== Audioanalyse: Frequenzbereiche extrahieren ======
+def analyze_audio_timevarying(audio_file, hop_length=2048, sr_desired=None):
+    y, sr = librosa.load(audio_file, sr=sr_desired, mono=True)
+    S = np.abs(librosa.stft(y, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=S.shape[0] * 2 - 2)
+
+    low_mask = freqs < 200
+    mid_mask = (freqs >= 200) & (freqs < 2000)
+    high_mask = freqs >= 2000
+
+    n_frames = S.shape[1]
+    frame_duration = hop_length / sr
+    data = []
+    for i in range(n_frames):
+        spectrum = S[:, i]
+        low_energy = np.sum(spectrum[low_mask])
+        mid_energy = np.sum(spectrum[mid_mask])
+        high_energy = np.sum(spectrum[high_mask])
+        total = low_energy + mid_energy + high_energy
+        if total == 0:
+            lr, mr, hr = 0.0, 0.0, 0.0
+        else:
+            lr = low_energy / total
+            mr = mid_energy / total
+            hr = high_energy / total
+        time_for_frame = i * frame_duration
+        data.append((time_for_frame, lr, mr, hr))
+    return data
+
+
+# ====== Zeitpunkt-basierte Frequenzverteilung abrufen ======
+def get_freq_ratios_at_time(t, freq_data):
+    if t <= freq_data[0][0]:
+        return freq_data[0][1:]
+    if t >= freq_data[-1][0]:
+        return freq_data[-1][1:]
+    for i in range(len(freq_data) - 1):
+        t0 = freq_data[i][0]
+        t1 = freq_data[i + 1][0]
+        if t0 <= t < t1:
+            return freq_data[i][1:]
+    return freq_data[-1][1:]
+
+
+# ====== Hauptframe-Manipulationsfunktion mit Effekten ======
+def dynamic_color_frame_from_array(args):
+    frame, t, freq_data, factor_b, factor_g, factor_r, time_start, time_end, debug_file = args
+
+    # Nur manipulieren, wenn innerhalb des angegebenen Zeitbereichs
+    if time_start <= t <= time_end:
+        lr, mr, hr = get_freq_ratios_at_time(t, freq_data)
+
+        with open(debug_file, 'a') as f:
+            f.write(f"Time: {t:.2f}, Low: {lr:.2f}, Mid: {mr:.2f}, High: {hr:.2f}\n")
+            f.write(f"Factors - Blue: {factor_b}, Green: {factor_g}, Red: {factor_r}\n")
+
+        # Farbe (RGB zu BGR für OpenCV)
+        frame = frame.astype(np.float32)
+        original_frame = frame.copy()
+        frame[..., 0] *= (1.0 + lr * factor_b)  # Blau
+        frame[..., 1] *= (1.0 + mr * factor_g)  # Grün
+        frame[..., 2] *= (1.0 + hr * factor_r)  # Rot
+        np.clip(frame, 0, 255, out=frame)
+
+        with open(debug_file, 'a') as f:
+            f.write(f"Original Pixel [0, 0]: {original_frame[0, 0]}\n")
+            f.write(f"Manipulated Pixel [0, 0]: {frame[0, 0]}\n")
+
+    return frame.astype(np.uint8)
+
+
+# ====== Hauptprozess ======
+def process_video_with_dynamic_audiofreq(input_video, output_file, factor_b, factor_g, factor_r, time_start, time_end, debug_file):
+    audio_file = f"{input_video}.wav"
+    os.system(f"ffmpeg -y -i {input_video} -q:a 0 -map a {audio_file}")
+
+    freq_data = analyze_audio_timevarying(audio_file, hop_length=2048)
+    clip = VideoFileClip(input_video)
+    fps = clip.fps
+    duration = clip.duration
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        times = np.arange(0, duration, 1.0 / fps)
+        args = [(clip.get_frame(t), t, freq_data, factor_b, factor_g, factor_r, time_start, time_end, debug_file) for t in times]
+
+        debug_file_path = os.path.join(tmpdir, debug_file)
+        with multiprocessing.Pool() as pool:
+            frames = list(tqdm(pool.imap(dynamic_color_frame_from_array, args), total=len(args), desc="Rendering frames"))
+
+        print("📦 Speichern...")
+        frame_paths = []
+        for i, f in enumerate(frames):
+            path = os.path.join(tmpdir, f"frame_{i:05d}.png")
+            cv2.imwrite(path, f)
+            frame_paths.append(path)
+
+        ffmpeg_cmd = f"ffmpeg -y -framerate {fps} -i {tmpdir}/frame_%05d.png -i {audio_file} -c:v libx264 -preset fast -crf 18 -c:a aac -shortest {output_file}"
+        os.system(ffmpeg_cmd)
+
+
+# ====== CLI-Parser und Ausführung ======
+if __name__ == "__main__":
+    def parse_timerange(s):
+        if not s:
+            return 0, float('inf')
+        start_str, end_str = s.split("-")
+        def to_sec(t):
+            if t in ("0", "0.0", "0:00", ""):
+                return 0.0
+            parts = list(map(float, t.split(":")))
+            return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+        return to_sec(start_str), (to_sec(end_str) if end_str != "0" else float('inf'))
+
+    parser = argparse.ArgumentParser(description="Video-Audio Farbsynchronisation mit Effekten")
+    parser.add_argument("--factor-b", type=float, default=3.0, help="Faktor für Blaukanal")
+    parser.add_argument("--factor-g", type=float, default=3.0, help="Faktor für Grünkanal")
+    parser.add_argument("--factor-r", type=float, default=3.0, help="Faktor für Rotkanal")
+    parser.add_argument("--time", type=parse_timerange, default="0-9999")
+    parser.add_argument("--debug-file", type=str, default="debug_log.txt", help="Datei für Debug-Ausgaben")
+
+    args = parser.parse_args()
+    time_start, time_end = args.time
+
+    process_video_with_dynamic_audiofreq(
+        input_video="output.mp4",
+        output_file="output-color.mp4",
+        factor_b=args.factor_b,
+        factor_g=args.factor_g,
+        factor_r=args.factor_r,
+        time_start=time_start,
+        time_end=time_end,
+        debug_file=args.debug_file
+    )
