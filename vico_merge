@@ -99,7 +99,7 @@ def build_ffmpeg_concat(videos, output_path, crossfade=0, fps=30):
         cmd = ["ffmpeg", "-y"] + inputs + [
             "-filter_complex", filter_complex,
             "-map", last_v, "-map", last_a,
-            "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", output_path
+            "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", "-r", str(fps), output_path
         ]
         subprocess.run(cmd, check=True)
     else:

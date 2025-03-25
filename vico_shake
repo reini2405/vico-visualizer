@@ -6,11 +6,10 @@ import os
 import numpy as np
 import librosa
 import cv2
-import tempfile
 from moviepy.editor import VideoFileClip
 from tqdm import tqdm
+from multiprocessing import Pool
 
-clip_for_mp = None
 rms_data = []
 shake_intensity = 5.0
 shake_start = 0
@@ -42,82 +41,118 @@ def get_rms_at_time(t):
             return rms_data[i][1]
     return rms_data[-1][1]
 
+def load_frames(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap.release()
+    return frames
+
+def get_rms_list(times):
+    return [get_rms_at_time(t) for t in times]
+
 def safe_shake(frame, dx, dy):
     h, w = frame.shape[:2]
     M = np.float32([[1, 0, dx], [0, 1, dy]])
     shaken = cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT)
     return shaken
 
-def apply_shake(t):
-    global clip_for_mp, frame_h, frame_w
-    frame = clip_for_mp.get_frame(t).astype(np.float32)
+def process_shake_batch(args):
+    frames, rms_vals, times, shake_strength, shake_start, shake_end = args
+    results = []
+    for frame, rms, t in zip(frames, rms_vals, times):
+        if not (shake_start <= t <= shake_end) or rms < 0.001:
+            results.append(frame)
+            continue
 
-    if not (shake_start <= t <= shake_end):
-        return frame.astype(np.uint8)
+        max_offset = int(rms * shake_strength)
+        dx = np.random.randint(-max_offset, max_offset + 1)
+        dy = np.random.randint(-max_offset, max_offset + 1)
+        shaken = safe_shake(frame, dx, dy)
+        np.clip(shaken, 0, 255, out=shaken)
+        results.append(shaken.astype(np.uint8))
+    return results
 
-    rms = get_rms_at_time(t)
-    max_offset = int(rms * shake_intensity)
-
-    if max_offset < 1:
-        return frame.astype(np.uint8)
-
-    dx = np.random.randint(-max_offset, max_offset + 1)
-    dy = np.random.randint(-max_offset, max_offset + 1)
-
-    shaken = safe_shake(frame, dx, dy)
-
-    np.clip(shaken, 0, 255, out=shaken)
-    return shaken.astype(np.uint8)
+def get_fps_from_video(video_file):
+    import subprocess
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    rate = result.stdout.strip()  # z. B. "25/1"
+    if "/" in rate:
+        num, denom = map(float, rate.split("/"))
+        return num / denom
+    return float(rate)
 
 def process(input_video, output_video, shake_strength, t_range):
-    global clip_for_mp, rms_data, shake_intensity, shake_start, shake_end, frame_h, frame_w
+    global rms_data, shake_intensity, shake_start, shake_end, frame_h, frame_w
 
     shake_intensity = shake_strength
     shake_start, shake_end = t_range
 
-    audio_file = input_video + ".wav"
-    os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
+    audio_file = f"{input_video}.wav"
+    if not os.path.exists(audio_file):
+        os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
 
     rms_data = analyze_rms(audio_file)
-    clip = VideoFileClip(input_video)
-    clip_for_mp = clip
-    frame_h, frame_w = int(clip.h), int(clip.w)
+    frames = load_frames(input_video)
+    fps = get_fps_from_video(input_video)
+    times = [i / fps for i in range(len(frames))]
+    frame_h, frame_w = frames[0].shape[:2]
 
-    fps = clip.fps
-    times = np.arange(0, clip.duration, 1.0 / fps)
+    rms_at_times = get_rms_list(times)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frame_dir = os.path.join(tmpdir, "frames")
-        os.makedirs(frame_dir)
+    batch_size = 16
+    batches = [
+        (frames[i:i+batch_size],
+         rms_at_times[i:i+batch_size],
+         times[i:i+batch_size],
+         shake_strength, shake_start, shake_end)
+        for i in range(0, len(frames), batch_size)
+    ]
 
-        print("🔁 Generiere Shake-Frames...")
-        frames = []
-        for t in tqdm(times, total=len(times)):
-            frame = apply_shake(t)
-            frames.append(frame)
+    all_shaken = []
+    with Pool() as pool:
+        for batch in tqdm(pool.imap(process_shake_batch, batches), total=len(batches)):
+            all_shaken.extend(batch)
 
-        for i, frame in enumerate(frames):
-            path = os.path.join(frame_dir, f"frame_{i:05d}.png")
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(path, frame_bgr)
+    out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
 
-        print(f"🎬 Erzeuge {output_video}...")
-        cmd = f"ffmpeg -y -framerate {fps} -i {frame_dir}/frame_%05d.png -i {audio_file} -c:v libx264 -preset fast -crf 18 -c:a aac -shortest {output_video}"
-        os.system(cmd)
+    for frame in all_shaken:
+        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    out.release()
+
+    ffmpeg_cmd = (
+        f"ffmpeg -y -i temp_noaudio.mp4 -i {audio_file} -map 0:v -map 1:a -c:v copy -c:a aac -shortest {output_video}"
+    )
+    os.system(ffmpeg_cmd)
+
+    if os.path.exists("temp_noaudio.mp4"):
+        os.remove("temp_noaudio.mp4")
 
     print(f"✅ Fertig: {output_video}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="🎥 Shake-Effekt basierend auf Audio-Lautstärke (RMS)")
-    parser.add_argument("-s", "--shake", type=float, required=True, help="Shake-Intensität (z. B. 10)")
-    parser.add_argument("-t", "--time", type=parse_timerange, default="0-9999", help="Zeitbereich in Sekunden z. B. 10-60")
+    parser.add_argument("-s", "--shake", type=float, required=True, help="Shake-Intensität (z.B. 10)")
+    parser.add_argument("-t", "--time", type=parse_timerange, default="0-9999", help="Zeitbereich in Sekunden z.B. 10-60")
+    parser.add_argument("--input", type=str, default="output-zoom.mp4", help="Input-Video (Standard: output-zoom.mp4)")
+    parser.add_argument("--output", type=str, default="output-shake.mp4", help="Output-Video (Standard: output-shake.mp4)")
 
     args = parser.parse_args()
 
     process(
-        input_video="output-color.mp4",
-        output_video="output-shake.mp4",
+        input_video=args.input,
+        output_video=args.output,
         shake_strength=args.shake,
         t_range=args.time
     )
-
