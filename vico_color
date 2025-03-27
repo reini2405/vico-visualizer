@@ -10,22 +10,20 @@ from tqdm import tqdm
 from multiprocessing import Pool, freeze_support
 
 
-def stft_gpu(y, n_fft=2048, hop_length=512):
+def stft_gpu_vectorized(y, n_fft=2048, hop_length=512):
     y_gpu = cp.asarray(y, dtype=cp.float32)
     window = cp.hanning(n_fft).astype(cp.float32)
     num_frames = 1 + (len(y_gpu) - n_fft) // hop_length
-    frames = cp.zeros((num_frames, n_fft), dtype=cp.float32)
-    for i in range(num_frames):
-        start = i * hop_length
-        frames[i] = y_gpu[start:start + n_fft] * window
+
+    indices = cp.arange(n_fft)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices] * window
     spectrum = cp.fft.rfft(frames, axis=1)
-    magnitude = cp.abs(spectrum)
-    return magnitude
+    return cp.abs(spectrum)
 
 
 def analyze_audio_timevarying(audio_file, hop_length=512, n_fft=2048, sr_desired=None):
     y, sr = librosa.load(audio_file, sr=sr_desired, mono=True)
-    S = stft_gpu(y, n_fft=n_fft, hop_length=hop_length)
+    S = stft_gpu_vectorized(y, n_fft=n_fft, hop_length=hop_length)
     freqs = cp.fft.rfftfreq(n_fft, d=1.0 / sr)
     low_mask = freqs < 200
     mid_mask = (freqs >= 200) & (freqs < 2000)

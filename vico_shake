@@ -12,16 +12,23 @@ from multiprocessing import Pool
 
 rms_data = []
 shake_intensity = 5.0
-shake_start = 0
-shake_end = float("inf")
 frame_h = None
 frame_w = None
 
-def parse_timerange(s):
-    if not s:
-        return 0, float('inf')
-    start, end = s.split("-")
-    return float(start), float(end)
+def parse_timeranges(timerange_list):
+    def to_seconds(t):
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+
+    ranges = []
+    for item in timerange_list:
+        if "-" not in item:
+            raise ValueError(f"⛔ Ungültiger Zeitbereich: {item}")
+        start_str, end_str = item.split("-")
+        start = to_seconds(start_str)
+        end = to_seconds(end_str)
+        ranges.append((start, end))
+    return ranges
 
 def analyze_rms(audio_path):
     y, sr = librosa.load(audio_path, sr=None, mono=True)
@@ -61,11 +68,14 @@ def safe_shake(frame, dx, dy):
     shaken = cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT)
     return shaken
 
+def is_in_any_timerange(t, ranges):
+    return any(start <= t <= end for start, end in ranges)
+
 def process_shake_batch(args):
-    frames, rms_vals, times, shake_strength, shake_start, shake_end = args
+    frames, rms_vals, times, shake_strength, shake_ranges = args
     results = []
     for frame, rms, t in zip(frames, rms_vals, times):
-        if not (shake_start <= t <= shake_end) or rms < 0.001:
+        if not is_in_any_timerange(t, shake_ranges) or rms < 0.001:
             results.append(frame)
             continue
 
@@ -93,11 +103,10 @@ def get_fps_from_video(video_file):
         return num / denom
     return float(rate)
 
-def process(input_video, output_video, shake_strength, t_range):
-    global rms_data, shake_intensity, shake_start, shake_end, frame_h, frame_w
+def process(input_video, output_video, shake_strength, shake_ranges):
+    global rms_data, shake_intensity, frame_h, frame_w
 
     shake_intensity = shake_strength
-    shake_start, shake_end = t_range
 
     audio_file = f"{input_video}.wav"
     if not os.path.exists(audio_file):
@@ -116,7 +125,8 @@ def process(input_video, output_video, shake_strength, t_range):
         (frames[i:i+batch_size],
          rms_at_times[i:i+batch_size],
          times[i:i+batch_size],
-         shake_strength, shake_start, shake_end)
+         shake_strength,
+         shake_ranges)
         for i in range(0, len(frames), batch_size)
     ]
 
@@ -126,7 +136,6 @@ def process(input_video, output_video, shake_strength, t_range):
             all_shaken.extend(batch)
 
     out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
-
     for frame in all_shaken:
         out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     out.release()
@@ -144,15 +153,22 @@ def process(input_video, output_video, shake_strength, t_range):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="🎥 Shake-Effekt basierend auf Audio-Lautstärke (RMS)")
     parser.add_argument("-s", "--shake", type=float, required=True, help="Shake-Intensität (z.B. 10)")
-    parser.add_argument("-t", "--time", type=parse_timerange, default="0-9999", help="Zeitbereich in Sekunden z.B. 10-60")
+    parser.add_argument(
+        "-t", "--time",
+        nargs="+",
+        type=str,
+        default=["0:00-9999:00"],
+        help="Zeitbereiche im Format MM:SS-MM:SS (mehrere möglich, z.B. 0:00-1:30 2:00-2:30)"
+    )
     parser.add_argument("--input", type=str, default="output-zoom.mp4", help="Input-Video (Standard: output-zoom.mp4)")
     parser.add_argument("--output", type=str, default="output-shake.mp4", help="Output-Video (Standard: output-shake.mp4)")
 
     args = parser.parse_args()
+    shake_ranges = parse_timeranges(args.time)
 
     process(
         input_video=args.input,
         output_video=args.output,
         shake_strength=args.shake,
-        t_range=args.time
+        shake_ranges=shake_ranges
     )
