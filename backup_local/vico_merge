@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import subprocess
+import shutil
+
+DEBUG_DIR = os.path.abspath("./vico_tmp")
+os.makedirs(DEBUG_DIR, exist_ok=True)
+
+LOGFILE = os.path.join(DEBUG_DIR, "ffmpeg.log")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Kombiniert Videos mit Audio (loop, ping-pong, crossfade, sicher)")
+    parser.add_argument("-a", "--audio", required=True, help="Audiodatei (z. B. Bass.wav)")
+    parser.add_argument("-v", "--videos", nargs="+", required=True, help="Videoclips in gewünschter Reihenfolge")
+    parser.add_argument("-r", "--reverse", action="store_true", help="Ping-Pong-Modus")
+    parser.add_argument("-c", "--crossfade", type=float, default=0, help="Crossfade in Sekunden")
+    parser.add_argument("--fps", type=int, default=30, help="Bildrate pro Sekunde")
+    return parser.parse_args()
+
+def ensure_audio_stream(file_path, output_path):
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a",
+           "-show_entries", "stream=index", "-of", "csv=p=0", file_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        subprocess.run([
+            "ffmpeg", "-y", "-i", file_path,
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-shortest", "-c:v", "copy", "-c:a", "aac", output_path
+        ], check=True)
+    else:
+        shutil.copy(file_path, output_path)
+    return output_path
+
+def prepare_videos(videos):
+    results = []
+    for i, v in enumerate(videos):
+        out = os.path.join(DEBUG_DIR, f"audio_{i}.mp4")
+        ensure_audio_stream(v, out)
+        results.append(out)
+    return results
+
+def get_duration(path):
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path
+        ]).strip()
+        return float(out)
+    except:
+        return 0.0
+
+def create_pingpong_videos(videos):
+    result = []
+    for i, v in enumerate(videos):
+        basename = os.path.splitext(os.path.basename(v))[0]
+        normal = os.path.join(DEBUG_DIR, f"{basename}_fwd.mp4")
+        reversed_path = os.path.join(DEBUG_DIR, f"{basename}_rev.mp4")
+        shutil.copy(v, normal)
+        subprocess.run([
+            "ffmpeg", "-y", "-i", v,
+            "-vf", "reverse", "-af", "areverse", reversed_path
+        ], check=True)
+        result.append(normal)
+        result.append(reversed_path)
+    return result
+
+def build_ffmpeg_concat(videos, output_path, crossfade=0, fps=30):
+    inputs = []
+    n = len(videos)
+
+    if crossfade > 0:
+        durations = [get_duration(v) for v in videos]
+        for v in videos:
+            inputs.extend(["-i", v])
+
+        filter_parts = []
+        xfade_parts = []
+        acrossfade_parts = []
+        current_offset = 0.0
+
+        for i in range(n):
+            filter_parts.append(f"[{i}:v]format=yuv420p,setsar=1[v{i}];")
+            filter_parts.append(f"[{i}:a]aformat=fltp:44100:stereo[a{i}];")
+
+        for i in range(n - 1):
+            v_in = f"v{i}" if i == 0 else f"xfv{i - 1}"
+            a_in = f"a{i}" if i == 0 else f"xfa{i - 1}"
+            offset = current_offset
+            xfade_parts.append(f"[{v_in}][v{i+1}]xfade=transition=fade:duration={crossfade}:offset={offset:.6f}[xfv{i}];")
+            acrossfade_parts.append(f"[{a_in}][a{i+1}]acrossfade=d={crossfade}[xfa{i}];")
+            current_offset += durations[i] - crossfade
+
+        filter_complex = "".join(filter_parts + xfade_parts + acrossfade_parts)
+        last_v = f"[xfv{n-2}]"
+        last_a = f"[xfa{n-2}]"
+        cmd = ["ffmpeg", "-y"] + inputs + [
+            "-filter_complex", filter_complex,
+            "-map", last_v, "-map", last_a,
+            "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", "-r", str(fps), output_path
+        ]
+        subprocess.run(cmd, check=True)
+    else:
+        concat_list = os.path.join(DEBUG_DIR, "concat_list.txt")
+        with open(concat_list, "w") as f:
+            for v in videos:
+                f.write(f"file '{os.path.abspath(v)}'\n")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+            "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", "-r", str(fps), output_path
+        ], check=True)
+
+def validate_video(path):
+    try:
+        out = subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path
+        ]).strip()
+        return out and float(out) > 0.5
+    except:
+        return False
+
+def loop_until_duration(input_video, audio_path, output_path, fps):
+    if not validate_video(input_video):
+        print("Fehler: intermediate.mp4 ungültig oder leer")
+        print(f"Datei: {input_video}")
+        exit(1)
+
+    audio_info = subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+    ])
+    audio_duration = float(audio_info.strip())
+    print(f"Audiodauer: {audio_duration:.2f}s")
+
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-stream_loop", "-1", "-i", input_video,
+        "-i", audio_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-t", str(audio_duration),
+        "-c:v", "copy", "-c:a", "aac", "-r", str(fps), output_path
+    ], check=True)
+
+def main():
+    args = parse_args()
+    print("Starte Verarbeitung...")
+
+    print("Bereite Audiospuren vor...")
+    prepared_videos = prepare_videos(args.videos)
+
+    if args.reverse:
+        print("Ping-Pong-Modus aktiv")
+        video_list = create_pingpong_videos(prepared_videos)
+    else:
+        video_list = prepared_videos
+
+    intermediate = os.path.join(DEBUG_DIR, "intermediate.mp4")
+    print("Erzeuge Zwischenvideo...")
+    build_ffmpeg_concat(video_list, intermediate, crossfade=args.crossfade, fps=args.fps)
+
+    print("Erzeuge finalen Export...")
+    loop_until_duration(intermediate, args.audio, "output.mp4", fps=args.fps)
+
+    print("Fertig: output.mp4")
+    print(f"Log-Datei: {LOGFILE}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,99 @@
+import argparse
+import librosa
+import numpy as np
+import json
+
+def to_mmss(seconds):
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+def format_bar(value, max_bars=12):
+    bars = int(np.clip(value * max_bars, 1, max_bars))
+    return "#" * bars
+
+def find_plateaus(signal, times, threshold_ratio, min_duration):
+    threshold = np.max(signal) * threshold_ratio
+    above = signal > threshold
+
+    areas = []
+    start_idx = None
+
+    for i, is_above in enumerate(above):
+        if is_above and start_idx is None:
+            start_idx = i
+        elif not is_above and start_idx is not None:
+            duration = times[i] - times[start_idx]
+            if duration >= min_duration:
+                avg_val = np.mean(signal[start_idx:i])
+                areas.append((times[start_idx], times[i], avg_val))
+            start_idx = None
+
+    if start_idx is not None:
+        duration = times[-1] - times[start_idx]
+        if duration >= min_duration:
+            avg_val = np.mean(signal[start_idx:])
+            areas.append((times[start_idx], times[-1], avg_val))
+
+    return areas
+
+def auto_detect(signal, times, min_duration, min_bereiche, name, normalize=True, json_output=None):
+    norm_signal = signal
+    if normalize:
+        max_val = np.max(signal)
+        if max_val > 0:
+            norm_signal = signal / max_val
+
+    for tol in np.arange(0.95, 0.0, -0.05):
+        plateaus = find_plateaus(norm_signal, times, tol, min_duration)
+        if len(plateaus) >= min_bereiche:
+            if json_output is not None:
+                json_output[name.lower()] = [(start, end) for start, end, _ in plateaus]
+            else:
+                print(f"\n{name} (tolerance={tol:.2f}):")
+                for start, end, avg_val in plateaus:
+                    print(f"{to_mmss(start)}-{to_mmss(end)}   {format_bar(avg_val)}")
+            return
+    if json_output is not None:
+        json_output[name.lower()] = []
+    else:
+        print(f"\n{name}: Keine passenden Bereiche gefunden.")
+
+def analyze(path, min_dauer, min_bereiche, output_json):
+    print(f"\n[Audio] Datei: {path}")
+    y, sr = librosa.load(path, sr=None, mono=True)
+
+    # RMS (Lautstärke)
+    rms = librosa.feature.rms(y=y)[0]
+    rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
+    auto_detect(rms, rms_times, min_dauer, min_bereiche, "Pegel-Zeiten", normalize=True, json_output=output_json)
+
+    # STFT für Frequenzanalyse
+    S = np.abs(librosa.stft(y, n_fft=2048, hop_length=512))
+    freqs = librosa.fft_frequencies(sr=sr)
+    times = librosa.frames_to_time(np.arange(S.shape[1]), sr=sr)
+
+    low_mask = freqs < 200
+    high_mask = freqs > 3000
+
+    lows = np.sum(S[low_mask, :], axis=0)
+    highs = np.sum(S[high_mask, :], axis=0)
+
+    auto_detect(highs, times, min_dauer, min_bereiche, "Höhen-Zeiten", normalize=True, json_output=output_json)
+    auto_detect(lows, times, min_dauer, min_bereiche, "Tiefen-Zeiten", normalize=True, json_output=output_json)
+
+    if output_json is not None:
+        print(json.dumps(output_json, indent=4))
+    else:
+        print("\n Fertig.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Automatische Audioanalyse für Videoeffekte")
+    parser.add_argument("-i", "--input", required=True, help="Pfad zur Audio-Datei")
+    parser.add_argument("--sek-dauer", type=float, default=3.0, help="Mindestdauer eines Abschnitts in Sekunden")
+    parser.add_argument("--min-bereiche", type=int, default=2, help="Mindestanzahl an Bereichen pro Kategorie")
+    parser.add_argument("--json", action="store_true", help="Ergebnisse als JSON ausgeben")
+
+    args = parser.parse_args()
+    output_json = {} if args.json else None
+    analyze(args.input, args.sek_dauer, args.min_bereiche, output_json)

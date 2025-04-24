@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import os
+import numpy as np
+import librosa
+import cv2
+from tqdm import tqdm
+from multiprocessing import Pool
+
+rms_data = []
+ripple_intensity = 5.0
+frame_h = None
+frame_w = None
+
+def parse_timeranges(timerange_list):
+    def to_seconds(t):
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+
+    ranges = []
+    for item in timerange_list:
+        if "-" not in item:
+            raise ValueError(f"⛔ Ungültiger Zeitbereich: {item}")
+        start_str, end_str = item.split("-")
+        start = to_seconds(start_str)
+        end = to_seconds(end_str)
+        ranges.append((start, end))
+    return ranges
+
+def analyze_rms(audio_path):
+    y, sr = librosa.load(audio_path, sr=None, mono=True)
+    rms = librosa.feature.rms(y=y)[0]
+    hop_length = 512
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    return list(zip(times, rms))
+
+def get_rms_at_time(t):
+    if t <= rms_data[0][0]:
+        return rms_data[0][1]
+    if t >= rms_data[-1][0]:
+        return rms_data[-1][1]
+    for i in range(len(rms_data) - 1):
+        t0, t1 = rms_data[i][0], rms_data[i + 1][0]
+        if t0 <= t < t1:
+            return rms_data[i][1]
+    return rms_data[-1][1]
+
+def load_frames(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap.release()
+    return frames
+
+def get_rms_list(times):
+    return [get_rms_at_time(t) for t in times]
+
+def is_in_any_timerange(t, ranges):
+    return any(start <= t <= end for start, end in ranges)
+
+def apply_ripple(frame, strength, phase, center=None):
+    h, w = frame.shape[:2]
+    y_indices, x_indices = np.indices((h, w), dtype=np.float32)
+
+    if center is None:
+        cx, cy = w // 2, h // 2
+    else:
+        cx, cy = center
+
+    dx = x_indices - cx
+    dy = y_indices - cy
+    radius = np.sqrt(dx**2 + dy**2)
+    angle = np.arctan2(dy, dx)
+
+    ripple = np.sin(radius / 10.0 - phase * 10) * strength
+    map_x = x_indices + ripple * np.cos(angle)
+    map_y = y_indices + ripple * np.sin(angle)
+
+    remapped = cv2.remap(frame, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    return remapped
+
+def process_ripple_batch(args):
+    frames, triggers, phases, times, ripple_ranges = args
+    results = []
+    for frame, strength, phase, t in zip(frames, triggers, phases, times):
+        if not is_in_any_timerange(t, ripple_ranges) or strength < 0.001:
+            results.append(frame)
+            continue
+
+        rippled = apply_ripple(frame, strength, phase)
+        np.clip(rippled, 0, 255, out=rippled)
+        results.append(rippled.astype(np.uint8))
+    return results
+
+def get_fps_from_video(video_file):
+    import subprocess
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    rate = result.stdout.strip()
+    if "/" in rate:
+        num, denom = map(float, rate.split("/"))
+        return num / denom
+    return float(rate)
+
+def process(input_video, output_video, ripple_strength, ripple_ranges):
+    global rms_data, ripple_intensity, frame_h, frame_w
+
+    ripple_intensity = ripple_strength
+
+    audio_file = f"{input_video}.wav"
+    if not os.path.exists(audio_file):
+        os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
+
+    rms_data = analyze_rms(audio_file)
+    frames = load_frames(input_video)
+    fps = get_fps_from_video(input_video)
+    times = [i / fps for i in range(len(frames))]
+    frame_h, frame_w = frames[0].shape[:2]
+
+    rms_vals = get_rms_list(times)
+    triggers = []
+    phases = []
+
+    for i in range(len(frames)):
+        rms = rms_vals[i]
+        t = times[i]
+        if rms > 0.1 and is_in_any_timerange(t, ripple_ranges):
+            triggers.append(ripple_strength)
+        else:
+            triggers.append(0.0)
+        phases.append((i % int(fps)) / fps)
+
+    batch_size = 16
+    batches = [
+        (frames[i:i+batch_size],
+         triggers[i:i+batch_size],
+         phases[i:i+batch_size],
+         times[i:i+batch_size],
+         ripple_ranges)
+        for i in range(0, len(frames), batch_size)
+    ]
+
+    all_rippled = []
+    with Pool() as pool:
+        for batch in tqdm(pool.imap(process_ripple_batch, batches), total=len(batches)):
+            all_rippled.extend(batch)
+
+    out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
+    for frame in all_rippled:
+        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    out.release()
+
+    ffmpeg_cmd = (
+        f"ffmpeg -y -i temp_noaudio.mp4 -i {audio_file} -map 0:v -map 1:a -c:v copy -c:a aac -shortest {output_video}"
+    )
+    os.system(ffmpeg_cmd)
+
+    if os.path.exists("temp_noaudio.mp4"):
+        os.remove("temp_noaudio.mp4")
+
+    print(f"✅ Fertig: {output_video}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="🎥 Ripple-Effekt basierend auf Audio-Lautstärke (RMS)")
+    parser.add_argument("-r", "--ripple", type=float, required=True, help="Ripple-Intensität (z.B. 10)")
+    parser.add_argument(
+        "-t", "--time",
+        nargs="+",
+        type=str,
+        default=["0:00-9999:00"],
+        help="Zeitbereiche im Format MM:SS-MM:SS (mehrere möglich, z.B. 0:00-1:30 2:00-2:30)"
+    )
+    parser.add_argument("--input", type=str, default="output-shake.mp4", help="Input-Video (Standard: output-shake.mp4)")
+    parser.add_argument("--output", type=str, default="output-ripple.mp4", help="Output-Video (Standard: output-ripple.mp4)")
+
+    args = parser.parse_args()
+    ripple_ranges = parse_timeranges(args.time)
+
+    process(
+        input_video=args.input,
+        output_video=args.output,
+        ripple_strength=args.ripple,
+        ripple_ranges=ripple_ranges
+    )

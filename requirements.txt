@@ -1,0 +1,25 @@
+# ===============================
+# 📦 requirements.txt für VICO-Projekt
+# ===============================
+
+# GUI (optional, falls du eine Streamlit-Weboberfläche nutzt)
+streamlit
+
+# Audioanalyse & Bearbeitung
+librosa
+pydub
+
+# Mathe & numerische Operationen
+numpy
+
+# CUDA-Unterstützung (falls verfügbar, optional)
+cupy  # ⚠️ Nur installieren, wenn CUDA/GPU verfügbar ist
+
+# Videoverarbeitung
+opencv-python  # stellt 'cv2' zur Verfügung
+
+# Fortschrittsanzeigen
+tqdm
+
+# Visualisierung (optional)
+matplotlib

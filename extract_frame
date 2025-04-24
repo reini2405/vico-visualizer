@@ -1,0 +1,47 @@
+import cv2
+import argparse
+import os
+import sys
+
+def extract_frame(video_path, frame_number, output_path):
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print(f"❌ Fehler beim Öffnen der Datei: {video_path}")
+        sys.exit(1)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_number < 0 or frame_number >= total_frames:
+        print(f"❌ Ungültige Frame-Nummer: {frame_number} (max. {total_frames - 1})")
+        sys.exit(1)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+    ret, frame = cap.read()
+
+    if ret:
+        cv2.imwrite(output_path, frame)
+        print(f"✅ Frame {frame_number} gespeichert als '{output_path}'")
+    else:
+        print(f"❌ Konnte Frame {frame_number} nicht lesen.")
+
+    cap.release()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="🎞️ Extrahiere einen bestimmten Frame aus einem MP4-Video.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument("video", help="Pfad zur MP4-Datei")
+    parser.add_argument(
+        "--frnr", "-f", type=int, default=0,
+        help="Nummer des Frames, der extrahiert werden soll (0 = erster Frame)"
+    )
+    parser.add_argument(
+        "--out", "-o", type=str, default="frame.jpg",
+        help="Name der Ausgabedatei (z.B. frame.jpg oder pfad/frame.png)"
+    )
+
+    args = parser.parse_args()
+    extract_frame(args.video, args.frnr, args.out)

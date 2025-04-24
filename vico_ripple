@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import os
+import numpy as np
+import librosa
+import cv2
+from tqdm import tqdm
+import random
+import cupy as cp
+
+# CUDA remapping Kernel (map_x, map_y)
+def generate_ripple_maps(h, w, centers, strength, phase):
+    y_indices, x_indices = cp.meshgrid(cp.arange(h, dtype=cp.float32), cp.arange(w, dtype=cp.float32), indexing='ij')
+    map_x = x_indices.copy()
+    map_y = y_indices.copy()
+
+    for cx, cy in centers:
+        dx = x_indices - cx
+        dy = y_indices - cy
+        radius = cp.sqrt(dx**2 + dy**2)
+        angle = cp.arctan2(dy, dx)
+
+        ripple = cp.sin(radius / 10.0 - phase * 10.0) * (strength)
+        map_x += ripple * cp.cos(angle)
+        map_y += ripple * cp.sin(angle)
+
+    map_x = cp.clip(map_x, 0, w - 1)
+    map_y = cp.clip(map_y, 0, h - 1)
+    return map_x, map_y
+
+
+def remap_cuda(frame, map_x, map_y):
+    h, w, c = frame.shape
+    out = cp.zeros_like(frame)
+    frame_gpu = cp.asarray(frame, dtype=cp.float32)
+    for i in range(c):
+        out[..., i] = cp.asarray(cv2.remap(cp.asnumpy(frame_gpu[..., i]),
+                                           cp.asnumpy(map_x),
+                                           cp.asnumpy(map_y),
+                                           interpolation=cv2.INTER_LINEAR,
+                                           borderMode=cv2.BORDER_REFLECT))
+    return out.astype(cp.uint8)
+
+
+def rms_gpu_vectorized(y, frame_length=2048, hop_length=512):
+    y_gpu = cp.asarray(y, dtype=cp.float32)
+    num_frames = 1 + (len(y_gpu) - frame_length) // hop_length
+    indices = cp.arange(frame_length)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices]
+    rms_values = cp.sqrt(cp.mean(frames ** 2, axis=1))
+    return rms_values.get()
+
+
+def analyze_rms(audio_path):
+    y, sr = librosa.load(audio_path, sr=None, mono=True)
+    rms = rms_gpu_vectorized(y)
+    hop_length = 512
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    return list(zip(times.tolist(), rms.tolist()))
+
+
+def get_rms_at_time(t, rms_data):
+    if t <= rms_data[0][0]: return rms_data[0][1]
+    if t >= rms_data[-1][0]: return rms_data[-1][1]
+    for i in range(len(rms_data) - 1):
+        t0, t1 = rms_data[i][0], rms_data[i + 1][0]
+        if t0 <= t < t1:
+            return rms_data[i][1]
+    return rms_data[-1][1]
+
+
+def parse_timeranges(timerange_list):
+    def to_seconds(t):
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+    return [(to_seconds(start), to_seconds(end)) for rng in timerange_list for start, end in [rng.split("-")]]
+
+
+def is_in_any_timerange(t, ranges):
+    return any(start <= t <= end for start, end in ranges)
+
+
+def load_frames(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap.release()
+    return frames
+
+
+def get_fps_from_video(video_file):
+    import subprocess
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    rate = result.stdout.strip()
+    if "/" in rate:
+        num, denom = map(float, rate.split("/"))
+        return num / denom
+    return float(rate)
+
+
+def process(input_video, output_video, ripple_strength, ripple_ranges, zentrenanzahl=1):
+    audio_file = f"{input_video}.wav"
+    if not os.path.exists(audio_file):
+        os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
+
+    rms_data = analyze_rms(audio_file)
+    frames = load_frames(input_video)
+    fps = get_fps_from_video(input_video)
+    times = [i / fps for i in range(len(frames))]
+    h, w = frames[0].shape[:2]
+
+    print(f"[INFO] CUDA-Remap-Ripple startet mit {len(frames)} Frames @ {fps:.2f} FPS")
+    out_frames = []
+
+    for i, (frame, t) in tqdm(enumerate(zip(frames, times)), total=len(frames), desc='🎛️ Ripple-GPU'):
+        rms = get_rms_at_time(t, rms_data)
+        phase = (i % int(fps)) / fps
+        if rms > 0.1 and is_in_any_timerange(t, ripple_ranges):
+            centers = [(random.randint(0, w - 1), random.randint(0, h - 1)) for _ in range(zentrenanzahl)]
+            map_x, map_y = generate_ripple_maps(h, w, centers, ripple_strength, phase)
+            rippled = remap_cuda(frame, map_x, map_y)
+            out_frames.append(cp.asnumpy(rippled))
+        else:
+            out_frames.append(frame)
+
+    out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+    for f in out_frames:
+        out.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
+    out.release()
+
+    os.system(f"ffmpeg -y -i temp_noaudio.mp4 -i {audio_file} -map 0:v -map 1:a -c:v copy -c:a aac -shortest {output_video}")
+    os.remove("temp_noaudio.mp4")
+    print(f"✅ Fertig: {output_video}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="🎥 CUDA-Remap Ripple basierend auf RMS")
+    parser.add_argument("-r", "--ripple", type=float, required=True, help="Ripple-Intensität")
+    parser.add_argument("-t", "--time", nargs="+", type=str, default=["0:00-9999:00"], help="Zeiträume z.B. 0:00-2:00")
+    parser.add_argument("-zp", "--zentrenanzahl", type=int, default=1, help="Anzahl Ripple-Zentren")
+    parser.add_argument("--input", type=str, default="output-shake.mp4", help="Input-Video")
+    parser.add_argument("--output", type=str, default="output-ripple.mp4", help="Output-Video")
+
+    args = parser.parse_args()
+    ripple_ranges = parse_timeranges(args.time)
+
+    process(
+        input_video=args.input,
+        output_video=args.output,
+        ripple_strength=args.ripple,
+        ripple_ranges=ripple_ranges,
+        zentrenanzahl=args.zentrenanzahl
+    )

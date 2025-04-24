@@ -1,0 +1,164 @@
+import moderngl
+import numpy as np
+import imageio.v2 as imageio
+import cv2
+from PIL import Image
+from pyrr import Matrix44
+import librosa
+import os
+import tempfile
+
+# Shader-Definitionen
+VERTEX_SHADER = """
+#version 330
+uniform mat4 model;
+uniform mat4 proj;
+in vec3 in_vert;
+in vec2 in_texcoord;
+out vec2 v_text;
+void main() {
+    gl_Position = proj * model * vec4(in_vert, 1.0);
+    v_text = in_texcoord;
+}
+"""
+
+FRAGMENT_SHADER = """
+#version 330
+uniform sampler2D tex;
+in vec2 v_text;
+out vec4 color;
+void main() {
+    color = texture(tex, v_text);
+}
+"""
+
+WIDTH, HEIGHT = 512, 512
+FPS = 30
+VIDEO_PATH = "output.mp4"
+
+# Verbessertes UV-Mapping
+CUBE_VERTICES = np.array([
+    # front
+    -1, -1,  1, 0, 0,   1, -1,  1, 1, 0,   1,  1,  1, 1, 1,
+    -1, -1,  1, 0, 0,   1,  1,  1, 1, 1,  -1,  1,  1, 0, 1,
+    # back
+     1, -1, -1, 0, 0,  -1, -1, -1, 1, 0,  -1,  1, -1, 1, 1,
+     1, -1, -1, 0, 0,  -1,  1, -1, 1, 1,   1,  1, -1, 0, 1,
+    # left
+    -1, -1, -1, 0, 0,  -1, -1,  1, 1, 0,  -1,  1,  1, 1, 1,
+    -1, -1, -1, 0, 0,  -1,  1,  1, 1, 1,  -1,  1, -1, 0, 1,
+    # right
+     1, -1,  1, 0, 0,   1, -1, -1, 1, 0,   1,  1, -1, 1, 1,
+     1, -1,  1, 0, 0,   1,  1, -1, 1, 1,   1,  1,  1, 0, 1,
+    # top
+    -1,  1,  1, 0, 0,   1,  1,  1, 1, 0,   1,  1, -1, 1, 1,
+    -1,  1,  1, 0, 0,   1,  1, -1, 1, 1,  -1,  1, -1, 0, 1,
+    # bottom
+    -1, -1, -1, 0, 0,   1, -1, -1, 1, 0,   1, -1,  1, 1, 1,
+    -1, -1, -1, 0, 0,   1, -1,  1, 1, 1,  -1, -1,  1, 0, 1,
+], dtype='f4')
+
+# UVs für alle 6 Seiten des Würfels
+CUBE_UV = np.array([
+    # front
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+    # back
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+    # left
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+    # right
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+    # top
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+    # bottom
+    0.0, 0.0,   1.0, 0.0,   1.0, 1.0,
+    0.0, 0.0,   1.0, 1.0,   0.0, 1.0,
+], dtype='f4')
+
+def extract_volume(audio_path, fps):
+    y, sr = librosa.load(audio_path, sr=None)
+    samples_per_frame = int(sr / fps)
+    volume = []
+    for i in range(len(y) // samples_per_frame):
+        chunk = y[i * samples_per_frame:(i + 1) * samples_per_frame]
+        vol = np.abs(chunk).mean()
+        volume.append(vol)
+    volume = np.array(volume)
+    return volume / np.max(volume)
+
+def get_audio_volume_from_video(video_path, fps=30):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+        audio_path = temp_audio.name
+    os.system(f'ffmpeg -y -i "{video_path}" -vn -acodec pcm_s16le -ar 44100 -ac 1 "{audio_path}"')
+    volume = extract_volume(audio_path, fps)
+    os.remove(audio_path)
+    return volume
+
+def render_frame(ctx, prog, vao, fbo, texture, scale, angle_deg):
+    texture.use()
+    fbo.use()
+    fbo.clear(0.05, 0.05, 0.05, 1.0)
+
+    proj = Matrix44.perspective_projection(45.0, WIDTH / HEIGHT, 0.1, 100.0, dtype='f4')
+
+    scale_matrix = Matrix44.from_scale([scale] * 3, dtype='f4')
+    rotation = Matrix44.from_y_rotation(np.radians(angle_deg), dtype='f4')
+    translate = Matrix44.from_translation([0.0, 0.0, -5.0], dtype='f4')
+
+    model = translate @ rotation @ scale_matrix
+
+    prog['proj'].write(proj.astype('f4').tobytes())
+    prog['model'].write(model.astype('f4').tobytes())
+
+    vao.render()
+
+    data = fbo.read(components=3, alignment=1)
+    img = np.frombuffer(data, dtype=np.uint8).reshape((HEIGHT, WIDTH, 3))
+    return np.flipud(img)
+
+def main():
+    print("🔊 Lade Audiodaten...")
+    volume = get_audio_volume_from_video(VIDEO_PATH, FPS)
+
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    ctx = moderngl.create_standalone_context()
+    print("✅ moderngl Context OK")
+
+    prog = ctx.program(vertex_shader=VERTEX_SHADER, fragment_shader=FRAGMENT_SHADER)
+    print("✅ Shader OK")
+
+    vbo = ctx.buffer(CUBE_VERTICES.tobytes())
+    uvbo = ctx.buffer(CUBE_UV.tobytes())
+    vao = ctx.simple_vertex_array(prog, vbo, 'in_vert', uvbo, 'in_texcoord')  # Korrekte VAO-Bindung
+    fbo = ctx.simple_framebuffer((WIDTH, HEIGHT))
+    print("✅ VAO/VBO/FBO bereit")
+
+    frame_index = 42
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    ret, frame = cap.read()
+    if not ret:
+        raise RuntimeError("⚠️ Kein Frame lesbar")
+
+    print(f"🎥 Frame {frame_index} geladen: shape={frame.shape}")
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(frame_rgb).transpose(Image.FLIP_TOP_BOTTOM)
+
+    tex = ctx.texture(pil_img.size, 3, pil_img.tobytes())
+    tex.build_mipmaps()
+    print("🖼 Textur geladen & gebunden")
+
+    scale = 0.5 + 0.5 * volume[frame_index]
+    angle = frame_index * 3
+
+    img = render_frame(ctx, prog, vao, fbo, tex, scale, angle)
+    imageio.imwrite("debug_frame_000.png", img)
+
+    print("✅ Frame gespeichert: debug_frame_000.png")
+
+if __name__ == "__main__":
+    main()

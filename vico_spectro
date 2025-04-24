@@ -1,0 +1,481 @@
+import numpy as np
+import cupy as cp
+import soundfile as sf
+import subprocess
+import argparse
+from PIL import Image, ImageDraw, ImageFont
+from tqdm import tqdm
+from threading import Thread
+from queue import Queue
+import cv2
+import os
+import time
+from scipy.interpolate import interp1d
+
+# CUDA-Kernel für schnelle Herzform-Berechnung
+heart_shape_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void heart_shape(float *x_out, float *y_out, int n_points, int width, int height, float scale) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < n_points) {
+        float t = 2.0f * 3.14159f * (float)idx / (float)n_points;
+        float x = 16.0f * powf(sinf(t), 3);
+        float y = 13.0f * cosf(t) - 5.0f * cosf(2.0f * t) - 2.0f * cosf(3.0f * t) - cosf(4.0f * t);
+        
+        // Skalieren und zentrieren
+        x = x * width * 0.015f * scale + width / 2.0f;
+        y = -y * height * 0.015f * scale + height / 2.0f;
+        
+        x_out[idx] = x;
+        y_out[idx] = y;
+    }
+}
+''', 'heart_shape')
+
+# CUDA-Kernel für schnellere Spektrumverarbeitung
+spectrum_process_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void process_spectrum(float *spectrum, int freq_bins, float *output, int output_size, float max_val) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < output_size) {
+        // Logarithmische Verteilung der Frequenzbins
+        int bin_start = powf(10.0f, logf(5.0f) + (logf((float)freq_bins) - logf(5.0f)) * ((float)idx / (float)output_size));
+        int bin_end = powf(10.0f, logf(5.0f) + (logf((float)freq_bins) - logf(5.0f)) * ((float)(idx+1) / (float)output_size));
+        
+        bin_start = max(0, min(freq_bins-1, bin_start));
+        bin_end = max(bin_start+1, min(freq_bins, bin_end));
+        
+        float sum = 0.0f;
+        int count = 0;
+        
+        for (int i = bin_start; i < bin_end; i++) {
+            sum += spectrum[i];
+            count++;
+        }
+        
+        if (count > 0) {
+            float mean = sum / (float)count;
+            // Logarithmische Normalisierung
+            output[idx] = logf(1.0f + mean) / logf(1.0f + max_val);
+        } else {
+            output[idx] = 0.0f;
+        }
+    }
+}
+''', 'process_spectrum')
+
+# CUDA-Kernel für Farbberechnungen
+color_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void apply_color(float *values, int n, unsigned char *colors, float *colormap, int colormap_size, int color_channels) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < n) {
+        float val = values[idx];
+        int color_idx = min((int)(val * (colormap_size - 1)), colormap_size - 1);
+        
+        // Copy RGB values
+        for (int c = 0; c < color_channels; c++) {
+            colors[idx * color_channels + c] = (unsigned char)colormap[color_idx * color_channels + c];
+        }
+    }
+}
+''', 'apply_color')
+
+class GPUProfiler:
+    def __init__(self):
+        self.timers = {}
+        self.active_timers = {}
+    
+    def start(self, name):
+        cp.cuda.Device().synchronize()
+        self.active_timers[name] = time.time()
+    
+    def stop(self, name):
+        cp.cuda.Device().synchronize()
+        if name in self.active_timers:
+            elapsed = time.time() - self.active_timers[name]
+            if name not in self.timers:
+                self.timers[name] = []
+            self.timers[name].append(elapsed)
+            del self.active_timers[name]
+    
+    def report(self):
+        print("\n===== GPU Profiling Report =====")
+        for name, times in self.timers.items():
+            avg_time = sum(times) / len(times) if times else 0
+            total = sum(times)
+            calls = len(times)
+            print(f"{name}: {avg_time*1000:.2f}ms avg, {total:.2f}s total, {calls} calls")
+        print("==============================\n")
+
+profiler = GPUProfiler()
+
+def stft_gpu(y, n_fft=2048, hop_length=512):
+    profiler.start("stft_gpu")
+    y_gpu = cp.asarray(y, dtype=cp.float32)
+    window = cp.hanning(n_fft).astype(cp.float32)
+    num_frames = 1 + (len(y_gpu) - n_fft) // hop_length
+    indices = cp.arange(n_fft)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices] * window
+    spectrum = cp.fft.rfft(frames, axis=1)
+    result = cp.abs(spectrum)
+    profiler.stop("stft_gpu")
+    return result
+
+def analyze_audio(audio_file, fps=30, n_fft=2048):
+    y, sr = sf.read(audio_file, always_2d=False, dtype='float32')
+    if y.ndim > 1:
+        y = np.mean(y, axis=1)
+    hop_length = int(sr / fps)
+    S = stft_gpu(y, n_fft=n_fft, hop_length=hop_length)
+    print(f"✅ STFT shape: {S.shape}, sr: {sr}")
+    return S, int(sr / hop_length), S.shape[0]
+
+def extract_audio_from_video(video_path, temp_wav):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+        "-ar", "44100", "-ac", "2", temp_wav
+    ], check=True)
+
+def generate_colormap(width):
+    profiler.start("generate_colormap")
+    color_keys = np.array([
+        [0, 0, 100], [0, 0, 255], [0, 255, 255], [0, 255, 0],
+        [255, 0, 0], [255, 165, 0], [255, 255, 40], [255, 250, 210]
+    ], dtype=np.float32)
+    log_steps = np.logspace(0, 1, len(color_keys), base=10.0)
+    log_steps = (log_steps - log_steps.min()) / (log_steps.max() - log_steps.min())
+    interp_func = interp1d(log_steps, color_keys, axis=0)
+    colormap = cp.asarray(interp_func(np.linspace(0, 1, width)), dtype=cp.float32)
+    profiler.stop("generate_colormap")
+    return colormap
+
+def export_ffmpeg(width, height, fps, audio_path, output_path):
+    return subprocess.Popen([
+        'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+        '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
+        '-i', audio_path, '-c:v', 'libx264', '-preset', 'fast',
+        '-crf', '18', '-c:a', 'aac', '-shortest', output_path
+    ], stdin=subprocess.PIPE)
+
+def writer_thread(pipe, q):
+    while True:
+        frame = q.get()
+        if frame is None:
+            break
+        pipe.stdin.write(frame)
+        q.task_done()
+
+def get_anchor_pos(anchor, width, height):
+    anchors = {
+        "tl": (40, 40),
+        "tr": (width - 150, 100),
+        "bl": (0, height),
+        "br": (width, height),
+        "mm": (width // 2, height // 2)
+    }
+    return anchors.get(anchor, (width - 150, 100))
+
+def compute_heart_shape_gpu(n_points, width, height, scale=1.0):
+    profiler.start("heart_shape_gpu")
+    # GPU arrays für die Ausgabe
+    x_out = cp.zeros(n_points, dtype=cp.float32)
+    y_out = cp.zeros(n_points, dtype=cp.float32)
+    
+    # Kernel-Ausführung konfigurieren
+    threads_per_block = 256
+    blocks_per_grid = (n_points + threads_per_block - 1) // threads_per_block
+    
+    # Kernel ausführen
+    heart_shape_kernel((blocks_per_grid,), (threads_per_block,), 
+                       (x_out, y_out, n_points, width, height, scale))
+    
+    # Runde zu Integer-Koordinaten
+    x_out = cp.round(x_out).astype(cp.int32)
+    y_out = cp.round(y_out).astype(cp.int32)
+    
+    # Ergebnisse zurück zur CPU kopieren
+    result = list(zip(cp.asnumpy(x_out), cp.asnumpy(y_out)))
+    profiler.stop("heart_shape_gpu")
+    return result
+
+def prepare_video_reader(bg_video_path, width, height):
+    if bg_video_path:
+        profiler.start("load_bg_video")
+        cap = cv2.VideoCapture(bg_video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Lade alle Frames in den RAM
+        frames = []
+        for _ in range(total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frames.append(cv2.resize(frame, (width, height)))
+        cap.release()
+        
+        print(f"✅ {len(frames)} Hintergrund-Frames geladen")
+        profiler.stop("load_bg_video")
+        return frames
+    return None
+
+def precompute_text_overlay(width, height, text, font, anchor, rotation, batch_size=100):
+    """Vorberechnen der Text-Overlays für verschiedene Skalierungen"""
+    profiler.start("precompute_text")
+    overlay_text = text.replace("\\n", "\n") if text.strip() else "Inier Ti\nRed"
+    
+    # Wir berechnen eine Reihe von Textgrößen vor und wählen dann die nächstliegende
+    scales = np.linspace(0.8, 3.0, batch_size)
+    text_overlays = []
+    
+    for scale in scales:
+        font_size = int(np.clip(48 * scale, 24, 72))
+        try:
+            scaled_font = ImageFont.truetype("arial.ttf", size=font_size)
+        except:
+            scaled_font = ImageFont.load_default()
+        
+        text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(text_layer)
+        alpha = 128
+        
+        draw.multiline_text((0, 0), overlay_text, font=scaled_font, fill=(255, 0, 0, alpha), align="center")
+        bbox = draw.textbbox((0, 0), overlay_text, font=scaled_font)
+        text_pos = (get_anchor_pos(anchor, width, height)[0] - (bbox[2] - bbox[0]) // 2,
+                    get_anchor_pos(anchor, width, height)[1])
+        
+        # Text Position korrigieren
+        clean_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(clean_layer)
+        draw.multiline_text(text_pos, overlay_text, font=scaled_font, fill=(255, 0, 0, alpha), align="center")
+        
+        # Rotiere das Textlayer mit dem richtigen Pivot-Punkt
+        rotated = clean_layer.rotate(-rotation, resample=Image.BICUBIC, 
+                                     center=get_anchor_pos(anchor, width, height))
+        
+        text_overlays.append((scale, rotated))
+    
+    profiler.stop("precompute_text")
+    return text_overlays
+
+def process_spectrum_gpu(spectrum, freq_bins, n_points):
+    """Schnelle GPU-basierte Spektrumverarbeitung"""
+    profiler.start("process_spectrum")
+    
+    # Finde den maximalen Wert für die Normalisierung
+    max_val = cp.max(spectrum).item()
+    
+    # GPU-Arrays vorbereiten
+    output = cp.zeros(n_points, dtype=cp.float32)
+    
+    # Kernel-Ausführung konfigurieren
+    threads_per_block = 256
+    blocks_per_grid = (n_points + threads_per_block - 1) // threads_per_block
+    
+    # Kernel ausführen
+    spectrum_process_kernel((blocks_per_grid,), (threads_per_block,), 
+                          (spectrum, freq_bins, output, n_points, max_val))
+    
+    profiler.stop("process_spectrum")
+    return output
+
+def render_frame_batch_gpu(indices, S, width, height, colormap, text_overlays, bg_frames, 
+                          bar_mode, scale, anchor, rotation, bar_width, transparency, n_outline_points):
+    """Rendert mehrere Frames gleichzeitig mit maximaler GPU-Nutzung"""
+    profiler.start("render_batch")
+    batch_size = len(indices)
+    results = []
+    
+    # Gemeinsame Vorberechnungen für die Batch
+    heart_points_precomputed = None
+    num_frames, freq_bins = S.shape
+    
+    for i in indices:
+        if i >= S.shape[0]:
+            continue
+            
+        # Spektrum für diesen Frame holen
+        spectrum = S[i]
+        
+        # RMS-Level und Skalierungsfaktor berechnen
+        rms_level = cp.mean(spectrum).get()
+        scale_factor = np.clip(rms_level * 4.0, 0.4, 3.0)
+        pulse = 1.0 + np.sin(i / 4.0) * 0.05
+        heart_scale = 1.0 + (scale_factor - 1.0) * 0.1 + (pulse - 1.0) * 0.1
+
+        # Berechne Heart-Shape-Punkte wenn nötig oder nutze vorberechnete
+        if i % 4 == 0 or heart_points_precomputed is None:  # Nur alle paar Frames neu berechnen
+            heart_points = compute_heart_shape_gpu(n_outline_points, width, height, heart_scale)
+            heart_points_precomputed = heart_points
+        else:
+            heart_points = heart_points_precomputed
+            
+        # Hintergrund-Frame vorbereiten
+        if bg_frames is not None:
+            frame_rgb = bg_frames[i % len(bg_frames)].copy()
+        else:
+            frame_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        # Bar-Alpha berechnen
+        bar_alpha = int(255 * (1 - transparency / 100))
+        
+        if bar_mode == 4:
+            # Center des Herzens
+            cx, cy = width // 2, height // 2
+            
+            # GPU-beschleunigte Spektrumverarbeitung
+            processed_values = process_spectrum_gpu(spectrum, freq_bins, len(heart_points))
+            processed_values_np = cp.asnumpy(processed_values)
+            
+            # Farben berechnen
+            colormap_np = cp.asnumpy(colormap)
+            
+            if not heart_points:
+                continue
+
+            for idx, (hx, hy) in enumerate(heart_points):
+                if idx >= len(processed_values_np):
+                    continue
+                    
+                norm_val = processed_values_np[idx]
+                if norm_val <= 0.01:  # Schwellenwert um unnötige Berechnungen zu vermeiden
+                    continue
+                
+                # Balkenlänge berechnen
+                strength = np.clip(norm_val * 1.2, 0, 1)
+                bar_len = int(strength * height * 0.2 * scale)
+                if bar_len <= 2:
+                    continue
+                
+                # Richtungsvektor berechnen
+                dx = hx - cx
+                dy = hy - cy
+                norm = np.hypot(dx, dy) + 1e-6
+                dx /= norm
+                dy /= norm
+                
+                # Endpunkt berechnen
+                x_end = int(hx + dx * bar_len)
+                y_end = int(hy + dy * bar_len)
+                
+                # Farbe bestimmen
+                color_index = int(np.clip(norm_val * (colormap_np.shape[0] - 1), 0, colormap_np.shape[0] - 1))
+                color = colormap_np[color_index]
+                
+                # Balken zeichnen
+                if transparency < 100:  # Nur zeichnen wenn nicht vollständig transparent
+                    cv2.line(frame_rgb, (hx, hy), (x_end, y_end), tuple(map(int, color)), bar_width, lineType=cv2.LINE_8)
+        
+        # Text-Overlay basierend auf Skalierungsfaktor auswählen
+        closest_scale_idx = np.abs(np.array([s for s, _ in text_overlays]) - heart_scale).argmin()
+        _, text_layer = text_overlays[closest_scale_idx]
+        
+        # Kombiniere Text und Bild
+        img_pil = Image.fromarray(cv2.cvtColor(frame_rgb, cv2.COLOR_BGR2RGB)).convert("RGBA")
+        final = Image.alpha_composite(img_pil, text_layer).convert("RGB")
+        
+        # Frame zum Batch hinzufügen
+        results.append((i, final.tobytes()))
+    
+    profiler.stop("render_batch")
+    return results
+
+def render_with_gpu_acceleration(S, colormap, height, pipe, text, fps, bar_mode, scale, 
+                               anchor, rotation, bar_width, transparency, bg_video_path, 
+                               batch_size=4, n_outline_points=180):
+    """Hauptfunktion für das Rendering mit maximaler GPU-Beschleunigung"""
+    num_frames, freq_bins = S.shape
+    width = colormap.shape[0]
+    
+    # Bereite Hintergrundvideo vor
+    bg_frames = prepare_video_reader(bg_video_path, width, height)
+    
+    # Text-Overlays vorberechnen für verschiedene Skalierungen
+    try:
+        font = ImageFont.truetype("arial.ttf", size=48)
+    except:
+        font = ImageFont.load_default()
+    
+    text_overlays = precompute_text_overlay(width, height, text, font, anchor, rotation)
+    
+    # Schreib-Queue und Thread starten
+    q = Queue(maxsize=batch_size*2)
+    writer = Thread(target=writer_thread, args=(pipe, q))
+    writer.start()
+    
+    # Progress-Bar für alle Frames
+    with tqdm(total=num_frames, desc="Render", ncols=100) as pbar:
+        for batch_start in range(0, num_frames, batch_size):
+            batch_end = min(batch_start + batch_size, num_frames)
+            batch_indices = list(range(batch_start, batch_end))
+            
+            # GPU-beschleunigte Batch-Verarbeitung
+            frames = render_frame_batch_gpu(batch_indices, S, width, height, colormap, text_overlays,
+                                          bg_frames, bar_mode, scale, anchor, rotation, 
+                                          bar_width, transparency, n_outline_points)
+            
+            # Füge Frames in richtiger Reihenfolge hinzu
+            frames.sort(key=lambda x: x[0])
+            for _, frame_bytes in frames:
+                q.put(frame_bytes)
+                pbar.update(1)
+    
+    # Signalisiere Ende
+    q.put(None)
+    writer.join()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-a", "--audio", help="Audio-Datei (WAV)")
+    parser.add_argument("-v", "--video", help="Hintergrundvideo mit Audio")
+    parser.add_argument("-o", "--output", default="output-spectro.mp4", help="Zielvideo")
+    parser.add_argument("-t", "--text", default="", help="Overlay-Text")
+    parser.add_argument("-b", "--bar-mode", type=int, default=1, choices=[1,2,3,4], help="1=unten, 2=mitte, 3=oben, 4=Herzform")
+    parser.add_argument("-sc", "--scale", type=float, default=1.0, help="Skalierung der Balkenhöhe")
+    parser.add_argument("--height", type=int, default=1080, help="Höhe des Videos")
+    parser.add_argument("-c", "--anchor", default="tr", help="Text-Ankerposition")
+    parser.add_argument("-r", "--rotate", type=int, default=45, help="Textrotation")
+    parser.add_argument("-bw", "--bar-width", type=int, default=3, help="Balkenbreite")
+    parser.add_argument("-tr", "--transparent", type=int, default=0, help="Transparenz der Balken (0-100)")
+    parser.add_argument("-up", "--outline-points", type=int, default=180, help="Anzahl der Umrisspunkte bei Herzform")
+    parser.add_argument("--batch", type=int, default=128, help="Anzahl der gleichzeitig zu verarbeitenden Frames")
+    parser.add_argument("--profile", action="store_true", help="Profiling-Informationen anzeigen")
+    args = parser.parse_args()
+
+    start_time = time.time()
+    temp_audio = "temp_audio.wav"
+    audio_source = args.audio
+    if args.video:
+        extract_audio_from_video(args.video, temp_audio)
+        print(f"✅ Audio extrahiert: {os.path.exists(temp_audio)}, Größe: {os.path.getsize(temp_audio)} Bytes")
+        audio_source = temp_audio
+
+    if not audio_source:
+        raise ValueError("-a oder -v muss angegeben werden!")
+
+    # Transparenz auf gültigen Bereich begrenzen
+    transparency = max(0, min(100, args.transparent))
+    if transparency != args.transparent:
+        print(f"⚠️ Transparenz auf gültigen Wert begrenzt: {transparency}%")
+
+    # STFT-Berechnung mit GPU
+    S, fps, total = analyze_audio(audio_source)
+    colormap = generate_colormap(1920)
+    pipe = export_ffmpeg(1920, args.height, fps, audio_source, args.output)
+
+    # Batch-Verarbeitung starten mit stärkerer GPU-Beschleunigung
+    render_with_gpu_acceleration(S, colormap, args.height, pipe, args.text, fps, args.bar_mode, 
+                              args.scale, args.anchor, args.rotate, args.bar_width, 
+                              transparency, args.video, args.batch, args.outline_points)
+
+    pipe.stdin.close()
+    pipe.wait()
+    if os.path.exists(temp_audio):
+        os.remove(temp_audio)
+    
+    total_time = time.time() - start_time
+    print(f"✅ Fertig: {args.output} in {total_time:.2f} Sekunden")
+    
+    # Zeige Profiling-Informationen wenn aktiviert
+    if args.profile:
+        profiler.report()

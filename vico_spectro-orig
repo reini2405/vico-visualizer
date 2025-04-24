@@ -1,0 +1,185 @@
+# Ersetzte ThreadPoolExecutor durch direkte Schleife für Stabilität beim Frame-Export
+
+import numpy as np
+import cupy as cp
+import soundfile as sf
+import subprocess
+import argparse
+from PIL import Image, ImageDraw, ImageFont
+from tqdm import tqdm
+from threading import Thread
+from queue import Queue
+from scipy.interpolate import interp1d
+import cv2
+import os
+
+def stft_gpu(y, n_fft=2048, hop_length=512):
+    y_gpu = cp.asarray(y, dtype=cp.float32)
+    window = cp.hanning(n_fft).astype(cp.float32)
+    num_frames = 1 + (len(y_gpu) - n_fft) // hop_length
+    indices = cp.arange(n_fft)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices] * window
+    spectrum = cp.fft.rfft(frames, axis=1)
+    return cp.abs(spectrum)
+
+def analyze_audio(audio_file, fps=30, n_fft=2048):
+    y, sr = sf.read(audio_file, always_2d=False, dtype='float32')
+    if y.ndim > 1:
+        y = np.mean(y, axis=1)
+    hop_length = int(sr / fps)
+    S = stft_gpu(y, n_fft=n_fft, hop_length=hop_length)
+    print(f"✅ STFT shape: {S.shape}, sr: {sr}")
+    return S, int(sr / hop_length), S.shape[0]
+
+def extract_audio_from_video(video_path, temp_wav):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+        "-ar", "44100", "-ac", "2", temp_wav
+    ], check=True)
+
+def generate_colormap(width):
+    color_keys = np.array([
+        [0, 0, 100], [0, 0, 255], [0, 255, 255], [0, 255, 0],
+        [255, 0, 0], [255, 165, 0], [255, 255, 40], [255, 250, 210]
+    ], dtype=np.float32)
+    log_steps = np.logspace(0, 1, len(color_keys), base=10.0)
+    log_steps = (log_steps - log_steps.min()) / (log_steps.max() - log_steps.min())
+    interp_func = interp1d(log_steps, color_keys, axis=0)
+    return cp.asarray(interp_func(np.linspace(0, 1, width)), dtype=cp.float32)
+
+def export_ffmpeg(width, height, fps, audio_path, output_path):
+    return subprocess.Popen([
+        'ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+        '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
+        '-i', audio_path, '-c:v', 'libx264', '-preset', 'fast',
+        '-crf', '18', '-c:a', 'aac', '-shortest', output_path
+    ], stdin=subprocess.PIPE)
+
+def writer_thread(pipe, q):
+    while True:
+        frame = q.get()
+        if frame is None:
+            break
+        pipe.stdin.write(frame)
+        q.task_done()
+
+def get_anchor_pos(anchor, width, height):
+    anchors = {
+        "tl": (40, 40),
+        "tr": (width - 150, 100),
+        "bl": (0, height),
+        "br": (width, height),
+        "mm": (width // 2, height // 2)
+    }
+    return anchors.get(anchor, (width - 150, 100))
+
+def render_batch_mode(S, colormap, height, pipe, text, fps, bar_mode, scale, anchor, rotation, bar_width, transparent, bg_video_path):
+    num_frames, freq_bins = S.shape
+    width = colormap.shape[0]
+    x_to_bins = np.linspace(0, freq_bins, width + 1, dtype=int)
+    colormap_np = cp.asnumpy(colormap)
+    q = Queue(maxsize=2)
+    writer = Thread(target=writer_thread, args=(pipe, q))
+    writer.start()
+    cap = cv2.VideoCapture(bg_video_path) if bg_video_path else None
+
+    overlay_text = text.replace("\\n", "\n") if text.strip() else "Inier Ti\nRed"
+
+    def render_frame(i):
+        spectrum = cp.asnumpy(S[i])
+        if cap:
+            ret, bg_frame = cap.read()
+            bg_frame = cv2.resize(bg_frame, (width, height)) if ret else np.zeros((height, width, 3), dtype=np.uint8)
+            frame_rgb = bg_frame
+        else:
+            frame_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+
+        rms_level = np.mean(spectrum)
+        scale_factor = np.clip(rms_level * 2.5, 0.6, 2.2)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", size=int(48 * scale_factor))
+        except:
+            font = ImageFont.load_default()
+
+        for x in range(width):
+            bin_start, bin_end = x_to_bins[x], x_to_bins[x + 1] if x + 1 < len(x_to_bins) else freq_bins
+            band = spectrum[bin_start:bin_end]
+            if band.size == 0:
+                continue
+            strength = np.clip(np.log1p(np.mean(band)) / 6, 0, 1)
+            bar_height = max(1, int(strength * height * scale))
+
+            if bar_mode == 2:
+                y_start = height // 2 - bar_height // 2
+                y_end = height // 2 + bar_height // 2 + (bar_height % 2)
+            elif bar_mode == 3:
+                y_start, y_end = 0, bar_height
+            else:
+                y_start, y_end = height - bar_height, height
+
+            color = colormap_np[x]
+            for dx in range(-(bar_width // 2), bar_width // 2 + 1):
+                x_pos = x + dx
+                if 0 <= x_pos < width:
+                    frame_rgb[y_start:y_end, x_pos] = (
+                        color * 0.5 + frame_rgb[y_start:y_end, x_pos] * 0.5
+                    ).astype(np.uint8) if transparent else color
+
+        img_pil = Image.fromarray(frame_rgb).convert("RGBA")
+        text_layer = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(text_layer)
+        alpha = 128 if transparent else 255
+        draw.multiline_text((0, 0), overlay_text, font=font, fill=(255, 0, 0, alpha), align="center")
+        bbox = draw.textbbox((0, 0), overlay_text, font=font)
+        text_pos = (get_anchor_pos(anchor, width, height)[0] - (bbox[2]-bbox[0])//2,
+                    get_anchor_pos(anchor, width, height)[1])
+        draw.multiline_text(text_pos, overlay_text, font=font, fill=(255, 0, 0, alpha), align="center")
+        final = Image.alpha_composite(img_pil, text_layer.rotate(-rotation, resample=Image.BICUBIC, center=get_anchor_pos(anchor, width, height))).convert("RGB")
+        return final.tobytes()
+
+    for i in tqdm(range(num_frames), desc="Render", ncols=100):
+        frame = render_frame(i)
+        q.put(frame)
+
+    q.put(None)
+    writer.join()
+    if cap:
+        cap.release()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-a", "--audio", help="Audio-Datei (WAV)")
+    parser.add_argument("-v", "--video", help="Hintergrundvideo mit Audio")
+    parser.add_argument("-o", "--output", default="output-spectro.mp4", help="Zielvideo")
+    parser.add_argument("-t", "--text", default="", help="Overlay-Text")
+    parser.add_argument("-b", "--bar-mode", type=int, default=1, choices=[1,2,3], help="1=unten, 2=mitte, 3=oben")
+    parser.add_argument("-sc", "--scale", type=float, default=1.0, help="Skalierung der Balkenhöhe")
+    parser.add_argument("--height", type=int, default=1080, help="Höhe des Videos")
+    parser.add_argument("-c", "--anchor", default="tr", help="Text-Ankerposition")
+    parser.add_argument("-r", "--rotate", type=int, default=45, help="Textrotation")
+    parser.add_argument("-bw", "--bar-width", type=int, default=3, help="Balkenbreite")
+    parser.add_argument("-tr", "--transparent", action="store_true", help="Transparenz aktivieren")
+    args = parser.parse_args()
+
+    temp_audio = "temp_audio.wav"
+    audio_source = args.audio
+    if args.video:
+        extract_audio_from_video(args.video, temp_audio)
+        print(f"✅ Audio extrahiert: {os.path.exists(temp_audio)}, Größe: {os.path.getsize(temp_audio)} Bytes")
+        audio_source = temp_audio
+
+    if not audio_source:
+        raise ValueError("-a oder -v muss angegeben werden!")
+
+    S, fps, total = analyze_audio(audio_source)
+    colormap = generate_colormap(1920)
+    pipe = export_ffmpeg(1920, args.height, fps, audio_source, args.output)
+
+    render_batch_mode(S, colormap, args.height, pipe, args.text, fps, args.bar_mode, args.scale, args.anchor, args.rotate, args.bar_width, args.transparent, args.video)
+
+    pipe.stdin.close()
+    pipe.wait()
+    if os.path.exists(temp_audio):
+        os.remove(temp_audio)
+    print(f"✅ Fertig: {args.output}")

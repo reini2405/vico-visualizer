@@ -6,7 +6,6 @@ import os
 import numpy as np
 import librosa
 import cv2
-import tempfile
 from tqdm import tqdm
 from multiprocessing import Pool
 import multiprocessing
@@ -14,16 +13,22 @@ from moviepy.editor import VideoFileClip
 
 rms_data = []
 zoom_factor = 1.0
-zoom_start = 0
-zoom_end = float("inf")
+zoom_ranges = []
 frame_h = None
 frame_w = None
 
-def parse_timerange(s):
-    if not s:
-        return 0, float('inf')
-    start, end = s.split("-")
-    return float(start), float(end)
+def parse_timeranges(timestr_list):
+    def to_seconds(t):
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+
+    timeranges = []
+    for timestr in timestr_list:
+        start_str, end_str = timestr.split("-")
+        start = to_seconds(start_str)
+        end = to_seconds(end_str)
+        timeranges.append((start, end))
+    return timeranges
 
 def analyze_rms(audio_path):
     y, sr = librosa.load(audio_path, sr=None, mono=True)
@@ -54,10 +59,12 @@ def safe_crop_and_resize(frame, nh, nw, h, w):
     return cropped
 
 def process_zoom_batch(args):
-    frames, times, rms_subset, zoom_factor, time_start, time_end = args
+    frames, times, rms_subset, zoom_factor, zoom_ranges = args
     results = []
     for frame, t, rms in zip(frames, times, rms_subset):
-        if not (time_start <= t <= time_end):
+        # Prüfe ob t in irgendeinem Zeitbereich liegt
+        in_range = any(start <= t <= end for start, end in zoom_ranges)
+        if not in_range:
             results.append(frame)
             continue
 
@@ -97,11 +104,10 @@ def get_fps_from_video(video_file):
         return num / denom
     return float(rate)
 
-def process(input_video, output_video, zoom_strength, t_range):
-    global rms_data, zoom_factor, zoom_start, zoom_end, frame_h, frame_w
+def process(input_video, output_video, zoom_strength, zoom_ranges):
+    global rms_data, zoom_factor, frame_h, frame_w
 
     zoom_factor = zoom_strength
-    zoom_start, zoom_end = t_range
 
     audio_file = f"{input_video}.wav"
     if not os.path.exists(audio_file):
@@ -120,7 +126,7 @@ def process(input_video, output_video, zoom_strength, t_range):
         (frames[i:i+batch_size],
          times[i:i+batch_size],
          rms_at_times[i:i+batch_size],
-         zoom_strength, zoom_start, zoom_end)
+         zoom_strength, zoom_ranges)
         for i in range(0, len(frames), batch_size)
     ]
 
@@ -148,13 +154,20 @@ def process(input_video, output_video, zoom_strength, t_range):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="🎥 Zoom-Effekt basierend auf Audio-Lautstärke (RMS)")
     parser.add_argument("-z", "--zoom", type=float, required=True, help="Zoom-Verstärkung (z.B. 1.5)")
-    parser.add_argument("-t", "--time", type=parse_timerange, default="0-9999", help="Zeitbereich in Sekunden z.B. 10-60")
+    parser.add_argument(
+        "-t", "--time",
+        nargs="+",
+        type=str,
+        default=["0:00-9999:00"],
+        help="Mehrere Zeitbereiche im Format MM:SS-MM:SS ... z. B. 0:00-1:30 2:00-2:45"
+    )
 
     args = parser.parse_args()
+    time_ranges = parse_timeranges(args.time)
 
     process(
         input_video="output-color.mp4",
         output_video="output-zoom.mp4",
         zoom_strength=args.zoom,
-        t_range=args.time
+        zoom_ranges=time_ranges
     )

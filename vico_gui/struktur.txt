@@ -1,0 +1,223 @@
+ Volume in Laufwerk C: hat keine Bezeichnung.
+ Volumeseriennummer: 1200-B7C5
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui
+
+29.03.2025  01:41    <DIR>          .
+29.03.2025  01:41    <DIR>          ..
+28.03.2025  20:08    <DIR>          core
+29.03.2025  00:43               728 main.py
+28.03.2025  19:38    <DIR>          modules
+29.03.2025  02:05                 0 struktur.txt
+28.03.2025  21:32    <DIR>          vico_modules
+               2 Datei(en),            728 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\core
+
+28.03.2025  20:08    <DIR>          .
+28.03.2025  20:08    <DIR>          ..
+28.03.2025  21:31               751 vico_executor.py
+28.03.2025  19:36                 0 __init__.py
+28.03.2025  21:31    <DIR>          __pycache__
+               2 Datei(en),            751 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\core\__pycache__
+
+28.03.2025  21:31    <DIR>          .
+28.03.2025  21:31    <DIR>          ..
+28.03.2025  21:31               781 vico_executor.cpython-39.pyc
+28.03.2025  20:08               136 __init__.cpython-39.pyc
+               2 Datei(en),            917 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules
+
+28.03.2025  19:38    <DIR>          .
+28.03.2025  19:38    <DIR>          ..
+28.03.2025  19:37    <DIR>          effects
+28.03.2025  19:37    <DIR>          export
+29.03.2025  01:55    <DIR>          merge
+28.03.2025  19:37    <DIR>          preview
+29.03.2025  01:13    <DIR>          timeline
+28.03.2025  19:36                 0 __init__.py
+28.03.2025  19:38    <DIR>          __pycache__
+               1 Datei(en),              0 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\effects
+
+28.03.2025  19:37    <DIR>          .
+28.03.2025  19:37    <DIR>          ..
+28.03.2025  19:36                 0 __init__.py
+               1 Datei(en),              0 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\export
+
+28.03.2025  19:37    <DIR>          .
+28.03.2025  19:37    <DIR>          ..
+28.03.2025  19:36                 0 __init__.py
+               1 Datei(en),              0 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\merge
+
+29.03.2025  01:55    <DIR>          .
+29.03.2025  01:55    <DIR>          ..
+29.03.2025  00:36            10ÿ120 merge_panel.py
+28.03.2025  19:36                 0 __init__.py
+29.03.2025  01:57    <DIR>          __pycache__
+               2 Datei(en),         10ÿ120 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\merge\__pycache__
+
+29.03.2025  01:57    <DIR>          .
+29.03.2025  01:57    <DIR>          ..
+29.03.2025  01:57             8ÿ520 merge_panel.cpython-39.pyc
+28.03.2025  19:38               145 __init__.cpython-39.pyc
+               2 Datei(en),          8ÿ665 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\preview
+
+28.03.2025  19:37    <DIR>          .
+28.03.2025  19:37    <DIR>          ..
+28.03.2025  19:36                 0 __init__.py
+               1 Datei(en),              0 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\timeline
+
+29.03.2025  01:13    <DIR>          .
+29.03.2025  01:13    <DIR>          ..
+29.03.2025  01:39             8ÿ013 timeline_canvas.py
+29.03.2025  00:48             7ÿ700 timeline_canvas.py-alt
+28.03.2025  19:26             1ÿ581 timeline_panel.py
+28.03.2025  19:36                 0 __init__.py
+29.03.2025  01:44    <DIR>          __pycache__
+               4 Datei(en),         17ÿ294 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\timeline\__pycache__
+
+29.03.2025  01:44    <DIR>          .
+29.03.2025  01:44    <DIR>          ..
+29.03.2025  01:44             6ÿ428 timeline_canvas.cpython-39.pyc
+28.03.2025  20:08             1ÿ969 timeline_panel.cpython-39.pyc
+28.03.2025  20:08               148 __init__.cpython-39.pyc
+               3 Datei(en),          8ÿ545 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\modules\__pycache__
+
+28.03.2025  19:38    <DIR>          .
+28.03.2025  19:38    <DIR>          ..
+28.03.2025  19:38               139 __init__.cpython-39.pyc
+               1 Datei(en),            139 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\vico_modules
+
+28.03.2025  21:32    <DIR>          .
+28.03.2025  21:32    <DIR>          ..
+29.03.2025  01:45        76ÿ632ÿ941 output.mp4
+27.03.2025  22:31             3ÿ286 vico_auto
+29.03.2025  01:41               933 vico_clean
+25.03.2025  08:06             5ÿ584 vico_color
+26.03.2025  21:29             6ÿ831 vico_merge
+29.03.2025  01:42             6ÿ360 vico_ripple
+29.03.2025  01:43             5ÿ581 vico_shake
+28.03.2025  22:38    <DIR>          vico_tmp
+29.03.2025  01:43             5ÿ470 vico_zoom
+28.03.2025  19:36                 0 __init__.py
+               9 Datei(en),     76ÿ666ÿ986 Bytes
+
+ Verzeichnis von C:\Users\reini\vico\vico_gui\vico_modules\vico_tmp
+
+28.03.2025  22:38    <DIR>          .
+28.03.2025  22:38    <DIR>          ..
+28.03.2025  22:38             1ÿ544 concat_list.txt
+29.03.2025  01:44        25ÿ175ÿ719 intermediate.mp4
+29.03.2025  01:44         5ÿ475ÿ222 noaudio_0.mp4
+29.03.2025  01:14         5ÿ475ÿ222 noaudio_0_fwd.mp4
+28.03.2025  22:01               154 noaudio_0_list.txt
+28.03.2025  22:01         3ÿ434ÿ911 noaudio_0_pingpong.mp4
+29.03.2025  01:14           941ÿ836 noaudio_0_rev.mp4
+29.03.2025  01:44         4ÿ304ÿ896 noaudio_1.mp4
+29.03.2025  01:06         1ÿ880ÿ789 noaudio_10.mp4
+29.03.2025  01:06         1ÿ283ÿ765 noaudio_11.mp4
+29.03.2025  01:06         3ÿ121ÿ735 noaudio_12.mp4
+29.03.2025  01:06         1ÿ545ÿ009 noaudio_13.mp4
+29.03.2025  01:06         1ÿ622ÿ714 noaudio_14.mp4
+29.03.2025  01:06         2ÿ244ÿ229 noaudio_15.mp4
+29.03.2025  01:06         2ÿ367ÿ436 noaudio_16.mp4
+29.03.2025  01:06         1ÿ575ÿ406 noaudio_17.mp4
+29.03.2025  01:06         1ÿ343ÿ297 noaudio_18.mp4
+29.03.2025  01:06         1ÿ902ÿ817 noaudio_19.mp4
+29.03.2025  01:14         4ÿ304ÿ896 noaudio_1_fwd.mp4
+28.03.2025  22:01               154 noaudio_1_list.txt
+28.03.2025  22:01         3ÿ527ÿ723 noaudio_1_pingpong.mp4
+29.03.2025  01:14           624ÿ563 noaudio_1_rev.mp4
+29.03.2025  01:44         3ÿ114ÿ484 noaudio_2.mp4
+29.03.2025  01:06         1ÿ367ÿ411 noaudio_20.mp4
+29.03.2025  01:06         2ÿ485ÿ903 noaudio_21.mp4
+28.03.2025  22:20         2ÿ274ÿ629 noaudio_22.mp4
+28.03.2025  22:20         1ÿ409ÿ535 noaudio_23.mp4
+28.03.2025  22:20         6ÿ237ÿ696 noaudio_24.mp4
+28.03.2025  22:20         6ÿ237ÿ696 noaudio_25.mp4
+28.03.2025  22:20         6ÿ237ÿ696 noaudio_26.mp4
+28.03.2025  22:20         6ÿ237ÿ696 noaudio_27.mp4
+28.03.2025  22:20         6ÿ511ÿ223 noaudio_28.mp4
+28.03.2025  22:20         6ÿ237ÿ696 noaudio_29.mp4
+29.03.2025  01:14         3ÿ114ÿ484 noaudio_2_fwd.mp4
+28.03.2025  22:01               154 noaudio_2_list.txt
+28.03.2025  22:01         4ÿ444ÿ162 noaudio_2_pingpong.mp4
+29.03.2025  01:14           435ÿ768 noaudio_2_rev.mp4
+29.03.2025  01:44         5ÿ505ÿ358 noaudio_3.mp4
+28.03.2025  22:20         4ÿ598ÿ270 noaudio_30.mp4
+28.03.2025  22:20        13ÿ225ÿ035 noaudio_31.mp4
+28.03.2025  22:20         5ÿ848ÿ950 noaudio_32.mp4
+28.03.2025  22:20        10ÿ565ÿ004 noaudio_33.mp4
+28.03.2025  22:20         9ÿ169ÿ763 noaudio_34.mp4
+28.03.2025  22:20         8ÿ098ÿ553 noaudio_35.mp4
+28.03.2025  22:20        10ÿ457ÿ005 noaudio_36.mp4
+28.03.2025  22:20         8ÿ495ÿ532 noaudio_37.mp4
+28.03.2025  22:20         7ÿ294ÿ096 noaudio_38.mp4
+28.03.2025  22:20         9ÿ621ÿ677 noaudio_39.mp4
+29.03.2025  01:14         5ÿ505ÿ358 noaudio_3_fwd.mp4
+28.03.2025  22:01               154 noaudio_3_list.txt
+28.03.2025  22:01         3ÿ665ÿ283 noaudio_3_pingpong.mp4
+29.03.2025  01:14           771ÿ616 noaudio_3_rev.mp4
+29.03.2025  01:44         4ÿ218ÿ565 noaudio_4.mp4
+28.03.2025  22:20         9ÿ157ÿ029 noaudio_40.mp4
+28.03.2025  22:20         6ÿ422ÿ046 noaudio_41.mp4
+28.03.2025  22:20        10ÿ157ÿ783 noaudio_42.mp4
+28.03.2025  22:20        11ÿ604ÿ526 noaudio_43.mp4
+28.03.2025  22:20         9ÿ972ÿ406 noaudio_44.mp4
+28.03.2025  22:20         9ÿ972ÿ406 noaudio_45.mp4
+28.03.2025  22:20        10ÿ457ÿ005 noaudio_46.mp4
+29.03.2025  01:14         4ÿ218ÿ565 noaudio_4_fwd.mp4
+28.03.2025  22:01               154 noaudio_4_list.txt
+28.03.2025  22:01         3ÿ014ÿ988 noaudio_4_pingpong.mp4
+29.03.2025  01:14           586ÿ655 noaudio_4_rev.mp4
+29.03.2025  01:44         3ÿ286ÿ169 noaudio_5.mp4
+29.03.2025  01:14         3ÿ286ÿ169 noaudio_5_fwd.mp4
+28.03.2025  22:01               154 noaudio_5_list.txt
+28.03.2025  22:01         3ÿ865ÿ331 noaudio_5_pingpong.mp4
+29.03.2025  01:14           417ÿ689 noaudio_5_rev.mp4
+29.03.2025  01:44         4ÿ484ÿ767 noaudio_6.mp4
+29.03.2025  01:14         4ÿ484ÿ767 noaudio_6_fwd.mp4
+28.03.2025  22:01               154 noaudio_6_list.txt
+28.03.2025  22:01         2ÿ403ÿ255 noaudio_6_pingpong.mp4
+29.03.2025  01:14           702ÿ265 noaudio_6_rev.mp4
+29.03.2025  01:44         4ÿ949ÿ259 noaudio_7.mp4
+29.03.2025  01:14         4ÿ949ÿ259 noaudio_7_fwd.mp4
+28.03.2025  22:01               154 noaudio_7_list.txt
+28.03.2025  22:01         2ÿ865ÿ734 noaudio_7_pingpong.mp4
+29.03.2025  01:14           840ÿ396 noaudio_7_rev.mp4
+29.03.2025  01:44         3ÿ463ÿ011 noaudio_8.mp4
+29.03.2025  01:14         3ÿ463ÿ011 noaudio_8_fwd.mp4
+28.03.2025  22:01               154 noaudio_8_list.txt
+28.03.2025  22:01         3ÿ820ÿ246 noaudio_8_pingpong.mp4
+29.03.2025  01:14           515ÿ230 noaudio_8_rev.mp4
+29.03.2025  01:44         3ÿ714ÿ955 noaudio_9.mp4
+29.03.2025  01:14         3ÿ714ÿ955 noaudio_9_fwd.mp4
+28.03.2025  22:01               154 noaudio_9_list.txt
+28.03.2025  22:01         3ÿ990ÿ674 noaudio_9_pingpong.mp4
+29.03.2025  01:14           579ÿ313 noaudio_9_rev.mp4
+              89 Datei(en),    370ÿ901ÿ277 Bytes
+
+     Anzahl der angezeigten Dateien:
+             120 Datei(en),    447ÿ615ÿ422 Bytes
+              41 Verzeichnis(se), 1ÿ862ÿ131ÿ515ÿ392 Bytes frei

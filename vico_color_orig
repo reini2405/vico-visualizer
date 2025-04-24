@@ -1,0 +1,152 @@
+# -*- coding: utf-8 -*-
+
+import os
+import cupy as cp
+import numpy as np
+import argparse
+import librosa
+import cv2
+from tqdm import tqdm
+from multiprocessing import Pool, freeze_support
+
+
+def stft_gpu_vectorized(y, n_fft=2048, hop_length=512):
+    y_gpu = cp.asarray(y, dtype=cp.float32)
+    window = cp.hanning(n_fft).astype(cp.float32)
+    num_frames = 1 + (len(y_gpu) - n_fft) // hop_length
+
+    indices = cp.arange(n_fft)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices] * window
+    spectrum = cp.fft.rfft(frames, axis=1)
+    return cp.abs(spectrum)
+
+
+def analyze_audio_timevarying(audio_file, hop_length=512, n_fft=2048, sr_desired=None):
+    y, sr = librosa.load(audio_file, sr=sr_desired, mono=True)
+    S = stft_gpu_vectorized(y, n_fft=n_fft, hop_length=hop_length)
+    freqs = cp.fft.rfftfreq(n_fft, d=1.0 / sr)
+    low_mask = freqs < 200
+    mid_mask = (freqs >= 200) & (freqs < 2000)
+    high_mask = freqs >= 2000
+    total = cp.sum(S, axis=1)
+    lr = cp.sum(S[:, low_mask], axis=1) / total
+    mr = cp.sum(S[:, mid_mask], axis=1) / total
+    hr = cp.sum(S[:, high_mask], axis=1) / total
+    times = cp.arange(S.shape[0]) * (hop_length / sr)
+    return list(zip(times.get(), lr.get(), mr.get(), hr.get()))
+
+
+def get_freq_ratios_at_time(t, freq_data):
+    if t <= freq_data[0][0]: return freq_data[0][1:]
+    if t >= freq_data[-1][0]: return freq_data[-1][1:]
+    for i in range(len(freq_data) - 1):
+        t0, t1 = freq_data[i][0], freq_data[i+1][0]
+        if t0 <= t < t1:
+            return freq_data[i][1:]
+    return freq_data[-1][1:]
+
+
+def dynamic_color_frame_batch(frames, times, freq_data, fb, fg, fr, time_ranges):
+    frames_gpu = cp.asarray(frames, dtype=cp.float32)
+    for i, t in enumerate(times):
+        if any(t_start <= t <= t_end for t_start, t_end in time_ranges):
+            lr, mr, hr = get_freq_ratios_at_time(t, freq_data)
+            frames_gpu[i, ..., 0] *= 1.0 + lr * fb
+            frames_gpu[i, ..., 1] *= 1.0 + mr * fg
+            frames_gpu[i, ..., 2] *= 1.0 + hr * fr
+    cp.clip(frames_gpu, 0, 255, out=frames_gpu)
+    return cp.asnumpy(frames_gpu).astype(np.uint8)
+
+
+def dynamic_color_frame_batch_wrapper(args):
+    return dynamic_color_frame_batch(*args)
+
+
+def load_frames(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    cap.release()
+    return frames
+
+
+def get_fps(video_file):
+    import subprocess
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_file],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    rate = result.stdout.strip()
+    if "/" in rate:
+        num, denom = map(float, rate.split("/"))
+        return num / denom
+    return float(rate)
+
+
+def process_video(input_video, output_video, fb, fg, fr, time_ranges):
+    audio_file = f"{input_video}.wav"
+    os.system(f"ffmpeg -y -i {input_video} -q:a 0 -map a {audio_file}")
+
+    freq_data = analyze_audio_timevarying(audio_file)
+    frames = load_frames(input_video)
+    fps = get_fps(input_video)
+    times = np.linspace(0, len(frames) / fps, num=len(frames), endpoint=False)
+
+    frame_h, frame_w = frames[0].shape[:2]
+    out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
+
+    batch_size = 16
+    args = [
+        (frames[i:i+batch_size], times[i:i+batch_size], freq_data, fb, fg, fr, time_ranges)
+        for i in range(0, len(frames), batch_size)
+    ]
+
+    with Pool() as pool:
+        for batch in tqdm(pool.imap(dynamic_color_frame_batch_wrapper, args, chunksize=1), total=len(args)):
+            for f in batch:
+                out.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
+    out.release()
+
+    os.system(f"ffmpeg -y -i temp_noaudio.mp4 -i {audio_file} -map 0:v -map 1:a -c:v copy -c:a aac -shortest {output_video}")
+    os.remove("temp_noaudio.mp4")
+
+
+def parse_timeranges(timerange_list):
+    def to_sec(t):
+        if t in ("0", "0.0", "0:00", ""): return 0.0
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+
+    timeranges = []
+    for item in timerange_list:
+        start_str, end_str = item.split("-")
+        start = to_sec(start_str)
+        end = to_sec(end_str) if end_str != "0" else float('inf')
+        timeranges.append((start, end))
+    return timeranges
+
+
+if __name__ == "__main__":
+    freeze_support()
+    parser = argparse.ArgumentParser(description="GPU-Video Farbanalyse basierend auf Frequenzanteilen")
+    parser.add_argument("--factor-b", type=float, default=3.0, help="Faktor für Blaukanal")
+    parser.add_argument("--factor-g", type=float, default=3.0, help="Faktor für Grünkanal")
+    parser.add_argument("--factor-r", type=float, default=3.0, help="Faktor für Rotkanal")
+    parser.add_argument("--time", nargs="+", type=str, help="Mehrere Zeitbereiche z.B. 0:00-1:30 1:45-2:10")
+
+    args = parser.parse_args()
+    time_ranges = parse_timeranges(args.time)
+
+    process_video(
+        input_video="output.mp4",
+        output_video="output-color.mp4",
+        fb=args.factor_b,
+        fg=args.factor_g,
+        fr=args.factor_r,
+        time_ranges=time_ranges
+    )

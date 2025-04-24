@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import os
+import numpy as np
+import librosa
+import cv2
+from tqdm import tqdm
+from multiprocessing import Pool
+import multiprocessing
+from moviepy.editor import VideoFileClip
+
+rms_data = []
+zoom_factor = 1.0
+zoom_ranges = []
+frame_h = None
+frame_w = None
+
+def parse_timeranges(timestr_list):
+    def to_seconds(t):
+        parts = list(map(float, t.split(":")))
+        return sum(p * 60 ** (len(parts) - i - 1) for i, p in enumerate(parts))
+
+    timeranges = []
+    for timestr in timestr_list:
+        start_str, end_str = timestr.split("-")
+        start = to_seconds(start_str)
+        end = to_seconds(end_str)
+        timeranges.append((start, end))
+    return timeranges
+
+def analyze_rms(audio_path):
+    y, sr = librosa.load(audio_path, sr=None, mono=True)
+    rms = librosa.feature.rms(y=y)[0]
+    hop_length = 512
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    return list(zip(times, rms))
+
+def get_rms_at_time(t):
+    if t <= rms_data[0][0]:
+        return rms_data[0][1]
+    if t >= rms_data[-1][0]:
+        return rms_data[-1][1]
+    for i in range(len(rms_data) - 1):
+        t0, t1 = rms_data[i][0], rms_data[i + 1][0]
+        if t0 <= t < t1:
+            return rms_data[i][1]
+    return rms_data[-1][1]
+
+def safe_crop_and_resize(frame, nh, nw, h, w):
+    top = max((nh - h) // 2, 0)
+    left = max((nw - w) // 2, 0)
+    cropped = frame[top:top+h, left:left+w]
+
+    # Stelle sicher, dass das finale Bild exakt die Zielgröße hat
+    if cropped.shape[0] != h or cropped.shape[1] != w:
+        cropped = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    return cropped
+
+def process_zoom_batch(args):
+    frames, times, rms_subset, zoom_factor, zoom_ranges = args
+    results = []
+    for frame, t, rms in zip(frames, times, rms_subset):
+        # Prüfe ob t in irgendeinem Zeitbereich liegt
+        in_range = any(start <= t <= end for start, end in zoom_ranges)
+        if not in_range:
+            results.append(frame)
+            continue
+
+        factor = max(1.0 + rms * zoom_factor, 1.01)
+        h, w = frame.shape[:2]
+        nh, nw = int(h * factor), int(w * factor)
+        zoomed = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        cropped = safe_crop_and_resize(zoomed, nh, nw, h, w)
+        np.clip(cropped, 0, 255, out=cropped)
+        results.append(cropped.astype(np.uint8))
+    return results
+
+def load_frames(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))  # Für RGB-Konsistenz
+    cap.release()
+    return frames
+
+def get_fps_from_video(video_file):
+    import subprocess
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    rate = result.stdout.strip()  # z. B. "25/1"
+    if "/" in rate:
+        num, denom = map(float, rate.split("/"))
+        return num / denom
+    return float(rate)
+
+def process(input_video, output_video, zoom_strength, zoom_ranges):
+    global rms_data, zoom_factor, frame_h, frame_w
+
+    zoom_factor = zoom_strength
+
+    audio_file = f"{input_video}.wav"
+    if not os.path.exists(audio_file):
+        os.system(f"ffmpeg -y -i {input_video} -vn -ac 1 -ar 44100 -f wav {audio_file}")
+
+    rms_data = analyze_rms(audio_file)
+    frames = load_frames(input_video)
+    fps = get_fps_from_video(input_video)
+    times = [i / fps for i in range(len(frames))]
+    frame_h, frame_w = frames[0].shape[:2]
+
+    rms_at_times = [get_rms_at_time(t) for t in times]
+
+    batch_size = 16
+    batches = [
+        (frames[i:i+batch_size],
+         times[i:i+batch_size],
+         rms_at_times[i:i+batch_size],
+         zoom_strength, zoom_ranges)
+        for i in range(0, len(frames), batch_size)
+    ]
+
+    all_zoomed = []
+    with Pool() as pool:
+        for batch in tqdm(pool.imap(process_zoom_batch, batches), total=len(batches)):
+            all_zoomed.extend(batch)
+
+    out = cv2.VideoWriter("temp_noaudio.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_w, frame_h))
+
+    for frame in all_zoomed:
+        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    out.release()
+
+    ffmpeg_cmd = (
+        f"ffmpeg -y -i temp_noaudio.mp4 -i {audio_file} -map 0:v -map 1:a -c:v copy -c:a aac -shortest {output_video}"
+    )
+    os.system(ffmpeg_cmd)
+
+    if os.path.exists("temp_noaudio.mp4"):
+        os.remove("temp_noaudio.mp4")
+
+    print(f" Fertig: {output_video}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=" Zoom-Effekt basierend auf Audio-Lautstärke (RMS)")
+    parser.add_argument("-z", "--zoom", type=float, required=True, help="Zoom-Verstärkung (z.B. 1.5)")
+    parser.add_argument(
+        "-t", "--time",
+        nargs="+",
+        type=str,
+        default=["0:00-9999:00"],
+        help="Mehrere Zeitbereiche im Format MM:SS-MM:SS ... z. B. 0:00-1:30 2:00-2:45"
+    )
+
+    args = parser.parse_args()
+    time_ranges = parse_timeranges(args.time)
+
+    process(
+        input_video="output-color.mp4",
+        output_video="output-zoom.mp4",
+        zoom_strength=args.zoom,
+        zoom_ranges=time_ranges
+    )

@@ -1,0 +1,107 @@
+(venv) python vico_merge -h
+usage: vico_merge [-h] -a AUDIO -v VIDEOS [VIDEOS ...] [-r] [-c CROSSFADE] [--fps FPS]
+
+Kombiniert Videos mit Audio (loop, ping-pong, crossfade, sicher)
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -a AUDIO, --audio AUDIO
+                        Audiodatei (z. B. Bass.wav)
+  -v VIDEOS [VIDEOS ...], --videos VIDEOS [VIDEOS ...]
+                        Videoclips in gewünschter Reihenfolge
+  -r, --reverse         Ping-Pong-Modus
+  -c CROSSFADE, --crossfade CROSSFADE
+                        Crossfade in Sekunden
+  --fps FPS             Bildrate pro Sekunde
+liefert output.mp4
+für
+(venv) python vico_color -h
+usage: vico_color [-h] [--factor-b FACTOR_B] [--factor-g FACTOR_G] [--factor-r FACTOR_R] [--time TIME [TIME ...]]
+
+GPU-Video Farbanalyse basierend auf Frequenzanteilen
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --factor-b FACTOR_B   Faktor für Blaukanal
+  --factor-g FACTOR_G   Faktor für Grünkanal
+  --factor-r FACTOR_R   Faktor für Rotkanal
+  --time TIME [TIME ...]
+                        Mehrere Zeitbereiche z.B. 0:00-1:30 1:45-2:10
+liefert output-color.mp4
+für
+(venv) python vico_zoom -h
+usage: vico_zoom [-h] -z ZOOM [-t TIME [TIME ...]]
+
+🎥 Zoom-Effekt basierend auf Audio-Lautstärke (RMS)
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -z ZOOM, --zoom ZOOM  Zoom-Verstärkung (z.B. 1.5)
+  -t TIME [TIME ...], --time TIME [TIME ...]
+                        Mehrere Zeitbereiche im Format MM:SS-MM:SS ... z. B. 0:00-1:30 2:00-2:45
+liefert output-zoom.mp4
+für
+(venv) python vico_shake -h
+usage: vico_shake [-h] -s SHAKE [-t TIME [TIME ...]] [--input INPUT] [--output OUTPUT]
+
+🎥 Shake-Effekt basierend auf Audio-Lautstärke (RMS)
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -s SHAKE, --shake SHAKE
+                        Shake-Intensität (z.B. 10)
+  -t TIME [TIME ...], --time TIME [TIME ...]
+                        Zeitbereiche im Format MM:SS-MM:SS (mehrere möglich, z.B. 0:00-1:30 2:00-2:30)
+  --input INPUT         Input-Video (Standard: output-zoom.mp4)
+  --output OUTPUT       Output-Video (Standard: output-shake.mp4)
+liefert output-shake.mp4
+für
+(venv) python vico_ripple -h
+usage: vico_ripple [-h] -r RIPPLE [-t TIME [TIME ...]] [--input INPUT] [--output OUTPUT]
+
+🎥 Ripple-Effekt basierend auf Audio-Lautstärke (RMS)
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -r RIPPLE, --ripple RIPPLE
+                        Ripple-Intensität (z.B. 10)
+  -t TIME [TIME ...], --time TIME [TIME ...]
+                        Zeitbereiche im Format MM:SS-MM:SS (mehrere möglich, z.B. 0:00-1:30 2:00-2:30)
+  --input INPUT         Input-Video (Standard: output-shake.mp4)
+  --output OUTPUT       Output-Video (Standard: output-ripple.mp4)
+liefert output-ripple.mp4
+für wobei -a das original *.wav welches bei vico_merge angegeben worden ist verwendet werden soll und für -o auch der name vom *.wav file nur als *.mp4
+(venv) python vico_clean -h
+usage: vico_clean [-h] -v VIDEO -a AUDIO [-o OUTPUT]
+
+🔊 Ersetze Audiospur mit Originaldatei (verlustfrei für Video)
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -v VIDEO, --video VIDEO
+                        Input-Video (mit komprimierter Audiospur)
+  -a AUDIO, --audio AUDIO
+                        Original-Audiodatei (z. B. WAV)
+  -o OUTPUT, --output OUTPUT
+                        Zieldatei (Standard: output-clean.mp4)
+
+
+
+
+In Timeline Marker setzen auzo und manuel
+(venv) python vico_auto -h
+usage: vico_auto [-h] -i INPUT [--sek-dauer SEK_DAUER] [--min-bereiche MIN_BEREICHE]
+
+Automatische Audioanalyse für Videoeffekte
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -i INPUT, --input INPUT
+                        Pfad zur Audio-Datei
+  --sek-dauer SEK_DAUER
+                        Mindestdauer eines Abschnitts in Sekunden
+  --min-bereiche MIN_BEREICHE
+                        Mindestanzahl an Bereichen pro Kategorie
+
+
+

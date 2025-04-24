@@ -10,27 +10,38 @@ from tqdm import tqdm
 from multiprocessing import Pool, freeze_support
 
 
-def stft_gpu(y, n_fft=2048, hop_length=512):
+def stft_gpu_vectorized(y, n_fft=2048, hop_length=512):
     y_gpu = cp.asarray(y, dtype=cp.float32)
     window = cp.hanning(n_fft).astype(cp.float32)
     num_frames = 1 + (len(y_gpu) - n_fft) // hop_length
-    frames = cp.zeros((num_frames, n_fft), dtype=cp.float32)
-    for i in range(num_frames):
-        start = i * hop_length
-        frames[i] = y_gpu[start:start + n_fft] * window
+
+    indices = cp.arange(n_fft)[None, :] + hop_length * cp.arange(num_frames)[:, None]
+    frames = y_gpu[indices] * window
     spectrum = cp.fft.rfft(frames, axis=1)
-    magnitude = cp.abs(spectrum)
-    return magnitude
+    return cp.abs(spectrum)
 
 
-def analyze_audio_timevarying(audio_file, hop_length=512, n_fft=2048, sr_desired=None):
+def parse_freq_range(freq_str):
+    """Parses a frequency range string (e.g., '0-200') into a tuple of floats."""
+    start_str, end_str = freq_str.split("-")
+    start = float(start_str)
+    end = float('inf') if end_str == "0" else float(end_str)
+    return start, end
+
+
+def analyze_audio_timevarying(audio_file, hop_length=512, n_fft=2048, sr_desired=None,
+                              freq_b=(0, 200), freq_g=(200, 2000), freq_r=(2000, float('inf'))):
     y, sr = librosa.load(audio_file, sr=sr_desired, mono=True)
-    S = stft_gpu(y, n_fft=n_fft, hop_length=hop_length)
+    S = stft_gpu_vectorized(y, n_fft=n_fft, hop_length=hop_length)
     freqs = cp.fft.rfftfreq(n_fft, d=1.0 / sr)
-    low_mask = freqs < 200
-    mid_mask = (freqs >= 200) & (freqs < 2000)
-    high_mask = freqs >= 2000
+
+    low_mask = (freqs >= freq_b[0]) & (freqs < freq_b[1])
+    mid_mask = (freqs >= freq_g[0]) & (freqs < freq_g[1])
+    high_mask = (freqs >= freq_r[0]) & (freqs < freq_r[1])
+    print(f"[DEBUG] Frequenzmasken L/M/H: {cp.sum(low_mask).item()}, {cp.sum(mid_mask).item()}, {cp.sum(high_mask).item()}")
+
     total = cp.sum(S, axis=1)
+    total = cp.maximum(total, 1e-6)  # Vermeide NaN/Inf
     lr = cp.sum(S[:, low_mask], axis=1) / total
     mr = cp.sum(S[:, mid_mask], axis=1) / total
     hr = cp.sum(S[:, high_mask], axis=1) / total
@@ -90,11 +101,11 @@ def get_fps(video_file):
     return float(rate)
 
 
-def process_video(input_video, output_video, fb, fg, fr, time_ranges):
+def process_video(input_video, output_video, fb, fg, fr, freq_b, freq_g, freq_r, time_ranges):
     audio_file = f"{input_video}.wav"
     os.system(f"ffmpeg -y -i {input_video} -q:a 0 -map a {audio_file}")
 
-    freq_data = analyze_audio_timevarying(audio_file)
+    freq_data = analyze_audio_timevarying(audio_file, freq_b=freq_b, freq_g=freq_g, freq_r=freq_r)
     frames = load_frames(input_video)
     fps = get_fps(input_video)
     times = np.linspace(0, len(frames) / fps, num=len(frames), endpoint=False)
@@ -139,10 +150,17 @@ if __name__ == "__main__":
     parser.add_argument("--factor-b", type=float, default=3.0, help="Faktor für Blaukanal")
     parser.add_argument("--factor-g", type=float, default=3.0, help="Faktor für Grünkanal")
     parser.add_argument("--factor-r", type=float, default=3.0, help="Faktor für Rotkanal")
+    parser.add_argument("--freq-b", type=str, default="0-200", help="Frequenzbereich für Blaukanal, z.B. 0-300")
+    parser.add_argument("--freq-g", type=str, default="200-2000", help="Frequenzbereich für Grünkanal, z.B. 300-3000")
+    parser.add_argument("--freq-r", type=str, default="2000-0", help="Frequenzbereich für Rotkanal, z.B. 3000-0")
     parser.add_argument("--time", nargs="+", type=str, help="Mehrere Zeitbereiche z.B. 0:00-1:30 1:45-2:10")
 
     args = parser.parse_args()
-    time_ranges = parse_timeranges(args.time)
+    time_ranges = parse_timeranges(args.time) if args.time else [(0, float('inf'))]
+
+    freq_b_range = parse_freq_range(args.freq_b)
+    freq_g_range = parse_freq_range(args.freq_g)
+    freq_r_range = parse_freq_range(args.freq_r)
 
     process_video(
         input_video="output.mp4",
@@ -150,5 +168,8 @@ if __name__ == "__main__":
         fb=args.factor_b,
         fg=args.factor_g,
         fr=args.factor_r,
+        freq_b=freq_b_range,
+        freq_g=freq_g_range,
+        freq_r=freq_r_range,
         time_ranges=time_ranges
     )
